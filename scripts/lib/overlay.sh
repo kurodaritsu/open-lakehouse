@@ -116,9 +116,13 @@ resolve_port() {
 }
 
 # Populate OVERLAY_COMPOSE_ARGS with the -f (and --env-file) arguments for one
-# base service. Under an active overlay the sibling *.test.yml MUST exist and
-# `docker compose config` MUST render, else this aborts non-zero (plan 1.17.2).
+# base service. Under an active overlay the sibling *.test.yml must exist.
 # Overlay-inactive: just the base file.
+#
+# This is the START/STOP hot path, so it deliberately does NOT run
+# `docker compose config` — that render validation lives in
+# overlay_validate_all_services (activation preflight). Rendering here would let a
+# transient render error abort a teardown and orphan run-scoped containers.
 overlay_set_compose_args() {
     local svc="${1:?service required}"
     local base="docker-compose-${svc}.yml"
@@ -139,17 +143,14 @@ overlay_set_compose_args() {
     if [[ -n "${LAKEHOUSE_ENV_FILE:-}" ]]; then
         OVERLAY_COMPOSE_ARGS=(--env-file "${LAKEHOUSE_ENV_FILE}" "${OVERLAY_COMPOSE_ARGS[@]}")
     fi
-
-    if ! docker compose "${OVERLAY_COMPOSE_ARGS[@]}" config -q >/dev/null 2>&1; then
-        echo "overlay: 'docker compose config' failed to render for '${svc}' — aborting" >&2
-        return 1
-    fi
     return 0
 }
 
-# Validate that every overlay file for the active base set exists and renders.
-# Used at CLI startup / introspection so a missing or broken overlay aborts
-# before any command runs (plan 1.17.2 — "each base being invoked").
+# Validate that every overlay file for the active base set exists AND that
+# `docker compose config` renders successfully (plan 1.17.2 — activation
+# preflight). This is the single place that renders; it is invoked from the
+# introspection command, not from start/stop, so a render failure never blocks
+# teardown. Aborts non-zero on the first missing file or failed render.
 overlay_validate_all_services() {
     [[ "${OVERLAY_ACTIVE:-false}" == "true" ]] || return 0
     local svc
@@ -157,6 +158,10 @@ overlay_validate_all_services() {
         # Only the bases that actually ship in this repo.
         [[ -f "docker-compose-${svc}.yml" ]] || continue
         overlay_set_compose_args "${svc}" || return 1
+        if ! docker compose "${OVERLAY_COMPOSE_ARGS[@]}" config -q >/dev/null 2>&1; then
+            echo "overlay: 'docker compose config' failed to render for '${svc}' — aborting" >&2
+            return 1
+        fi
     done
     return 0
 }
