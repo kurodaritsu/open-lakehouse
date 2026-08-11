@@ -12,6 +12,13 @@ if [ -f "$PROJECT_ROOT/.env" ]; then
     set +a
 fi
 
+# Test-only overlay resolution + destructive-target validation. Sourced always;
+# a complete no-op unless the LAKEHOUSE_* overlay variables are set (plan 1.16.1).
+# Keeps compose files, container names, and published ports resolvable from one place.
+OVERLAY_ACTIVE=false
+# shellcheck source=scripts/lib/overlay.sh
+source "$PROJECT_ROOT/scripts/lib/overlay.sh"
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -291,22 +298,25 @@ wait_for_service() {
 
 # Wait for all services to be healthy
 wait_for_services() {
-    local spark_port=$(get_spark_port)
-    local master_container=$(get_spark_master_container)
+    local spark_port=$(resolve_port "$(get_spark_port)")
+    local master_container=$(resolve_container_name "$(get_spark_master_container)")
+    local kafka_ct zk_ct
+    kafka_ct=$(resolve_container_name kafka)
+    zk_ct=$(resolve_container_name zookeeper)
     echo ""
 
     # Kafka/Zookeeper (if started)
-    if docker ps --format '{{.Names}}' | grep -q '^zookeeper$'; then
-        wait_for_service "Zookeeper" "nc -z localhost 2181" 30
+    if docker ps --format '{{.Names}}' | grep -q "^${zk_ct}$"; then
+        wait_for_service "Zookeeper" "nc -z localhost $(resolve_port 2181)" 30
     fi
-    if docker ps --format '{{.Names}}' | grep -q '^kafka$'; then
-        wait_for_service "Kafka" "nc -z localhost 9092" 30
+    if docker ps --format '{{.Names}}' | grep -q "^${kafka_ct}$"; then
+        wait_for_service "Kafka" "nc -z localhost $(resolve_port 9092)" 30
     fi
 
     # Spark (if started)
     if docker ps --format '{{.Names}}' | grep -q "^${master_container}$"; then
         wait_for_service "Spark Master" "nc -z localhost $spark_port" 30
-        wait_for_service "Spark UI" "curl -s http://localhost:$(get_spark_ui_port) >/dev/null" 30
+        wait_for_service "Spark UI" "curl -s http://localhost:$(resolve_port "$(get_spark_ui_port)") >/dev/null" 30
     fi
 }
 
@@ -409,18 +419,21 @@ is_container_running() {
 
 # Status command - JSON output
 cmd_status_json() {
-    local pg_ok=$(is_service_healthy 5432 && echo "true" || echo "false")
-    local s3_ok=$(is_service_healthy 8333 && echo "true" || echo "false")
-    local spark_master=$(is_container_running "spark-master-41" && echo "true" || echo "false")
-    local spark_worker=$(is_container_running "spark-worker-41" && echo "true" || echo "false")
-    local spark_connect=$(is_container_running "spark-connect-41" && echo "true" || echo "false")
-    local connect_grpc=$(is_service_healthy "$(get_spark_connect_port)" && echo "true" || echo "false")
-    local kafka_ok=$(is_container_running "kafka" && echo "true" || echo "false")
-    local zk_ok=$(is_container_running "zookeeper" && echo "true" || echo "false")
-    local uc_ok=$(is_container_running "unity-catalog" && echo "true" || echo "false")
-    local airflow_web=$(is_container_running "airflow-webserver" && echo "true" || echo "false")
-    local airflow_sched=$(is_container_running "airflow-scheduler" && echo "true" || echo "false")
-    local mlflow_ok=$(is_container_running "mlflow" && echo "true" || echo "false")
+    # Container names and ports resolve through the overlay layer: identical to the
+    # literals on the default path, except the allow-listed mlflow->mlflow-server fix
+    # (T-1.5.11), and run-scoped/offset when a test overlay is active.
+    local pg_ok=$(is_service_healthy "$(resolve_port 5432)" && echo "true" || echo "false")
+    local s3_ok=$(is_service_healthy "$(resolve_port 8333)" && echo "true" || echo "false")
+    local spark_master=$(is_container_running "$(resolve_container_name spark-master-41)" && echo "true" || echo "false")
+    local spark_worker=$(is_container_running "$(resolve_container_name spark-worker-41)" && echo "true" || echo "false")
+    local spark_connect=$(is_container_running "$(resolve_container_name spark-connect-41)" && echo "true" || echo "false")
+    local connect_grpc=$(is_service_healthy "$(resolve_port "$(get_spark_connect_port)")" && echo "true" || echo "false")
+    local kafka_ok=$(is_container_running "$(resolve_container_name kafka)" && echo "true" || echo "false")
+    local zk_ok=$(is_container_running "$(resolve_container_name zookeeper)" && echo "true" || echo "false")
+    local uc_ok=$(is_container_running "$(resolve_container_name unity-catalog)" && echo "true" || echo "false")
+    local airflow_web=$(is_container_running "$(resolve_container_name airflow-webserver)" && echo "true" || echo "false")
+    local airflow_sched=$(is_container_running "$(resolve_container_name airflow-scheduler)" && echo "true" || echo "false")
+    local mlflow_ok=$(is_container_running "$(resolve_container_name mlflow)" && echo "true" || echo "false")
 
     cat <<EOF
 {
@@ -456,30 +469,43 @@ EOF
 cmd_status_human() {
     header "LAKEHOUSE STATUS"
 
+    local uc_ct spark_master_ct spark_worker_ct spark_connect_ct kafka_ct zk_ct
+    local airflow_web_ct airflow_sched_ct airflow_trig_ct mlflow_ct
+    uc_ct=$(resolve_container_name unity-catalog)
+    spark_master_ct=$(resolve_container_name spark-master-41)
+    spark_worker_ct=$(resolve_container_name spark-worker-41)
+    spark_connect_ct=$(resolve_container_name spark-connect-41)
+    kafka_ct=$(resolve_container_name kafka)
+    zk_ct=$(resolve_container_name zookeeper)
+    airflow_web_ct=$(resolve_container_name airflow-webserver)
+    airflow_sched_ct=$(resolve_container_name airflow-scheduler)
+    airflow_trig_ct=$(resolve_container_name airflow-triggerer)
+    mlflow_ct=$(resolve_container_name mlflow)
+
     echo -e "\n${YELLOW}System Services:${NC}"
-    check_service postgres 5432 "PostgreSQL"
-    check_service seaweedfs 8333 "SeaweedFS"
+    check_service postgres "$(resolve_port 5432)" "PostgreSQL"
+    check_service seaweedfs "$(resolve_port 8333)" "SeaweedFS"
 
     echo -e "\n${YELLOW}Unity Catalog:${NC}"
-    check_container "unity-catalog" && check_service uc 8081 "Unity Catalog REST API" || true
+    check_container "$uc_ct" && check_service uc "$(resolve_port 8081)" "Unity Catalog REST API" || true
 
     echo -e "\n${YELLOW}Spark 4.1 (Connect-first):${NC}"
-    check_container "spark-master-41" && docker exec spark-master-41 /opt/spark/bin/spark-submit --version 2>&1 | grep "version" | head -1 || true
-    check_container "spark-worker-41" || true
-    check_container "spark-connect-41" && check_service connect "$(get_spark_connect_port)" "Spark Connect gRPC" || true
+    check_container "$spark_master_ct" && docker exec "$spark_master_ct" /opt/spark/bin/spark-submit --version 2>&1 | grep "version" | head -1 || true
+    check_container "$spark_worker_ct" || true
+    check_container "$spark_connect_ct" && check_service connect "$(resolve_port "$(get_spark_connect_port)")" "Spark Connect gRPC" || true
     echo -e "  Spark Connect endpoint: ${BLUE}$(get_spark_remote)${NC}"
 
     echo -e "\n${YELLOW}Kafka Containers:${NC}"
-    check_container "kafka" || true
-    check_container "zookeeper" || true
+    check_container "$kafka_ct" || true
+    check_container "$zk_ct" || true
 
     echo -e "\n${YELLOW}Airflow Containers:${NC}"
-    check_container "airflow-webserver" && check_service airflow 8085 "Airflow UI" || true
-    check_container "airflow-scheduler" || true
-    check_container "airflow-triggerer" || true
+    check_container "$airflow_web_ct" && check_service airflow "$(resolve_port 8085)" "Airflow UI" || true
+    check_container "$airflow_sched_ct" || true
+    check_container "$airflow_trig_ct" || true
 
     echo -e "\n${YELLOW}MLflow:${NC}"
-    check_container "mlflow" && check_service mlflow 5000 "MLflow Tracking" || true
+    check_container "$mlflow_ct" && check_service mlflow "$(resolve_port 5000)" "MLflow Tracking" || true
 
     echo -e "\n${YELLOW}Ports:${NC}"
     echo "  PostgreSQL:       5432"
@@ -611,8 +637,7 @@ cmd_start() {
     header "STARTING SERVICES"
 
     local service=$1
-    local compose_file=$(get_spark_compose)
-    local spark_port=$(get_spark_port)
+    local spark_port=$(resolve_port "$(get_spark_port)")
 
     # Check port availability before starting
     if ! check_ports_for_service "$service"; then
@@ -623,9 +648,10 @@ cmd_start() {
 
     case $service in
         spark|all)
-            echo -e "${YELLOW}Starting Spark 4.1 (port $spark_port, Connect on $(get_spark_connect_port))...${NC}"
-            docker compose -f "$compose_file" up -d
-            wait_for_service "Spark Connect" "nc -z localhost $(get_spark_connect_port)" 90
+            echo -e "${YELLOW}Starting Spark 4.1 (port $spark_port, Connect on $(resolve_port "$(get_spark_connect_port)"))...${NC}"
+            overlay_set_compose_args spark41 || return 1
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d
+            wait_for_service "Spark Connect" "nc -z localhost $(resolve_port "$(get_spark_connect_port)")" 90
             echo -e "${GREEN}Spark Connect endpoint:${NC} $(get_spark_remote)"
             ;;
     esac
@@ -633,7 +659,8 @@ cmd_start() {
     case $service in
         kafka|all)
             echo -e "${YELLOW}Starting Kafka...${NC}"
-            docker compose -f docker-compose-kafka.yml up -d
+            overlay_set_compose_args kafka || return 1
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d
             ;;
     esac
 
@@ -645,8 +672,9 @@ cmd_start() {
                 cp config/unity-catalog/server.properties.example config/unity-catalog/server.properties
                 echo -e "${YELLOW}!${NC} Edit config/unity-catalog/server.properties with your S3 credentials"
             fi
-            docker compose -f docker-compose-unity-catalog.yml up -d
-            wait_for_service "Unity Catalog" "curl -s http://localhost:8081/api/2.1/unity-catalog/catalogs" 60
+            overlay_set_compose_args unity-catalog || return 1
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d
+            wait_for_service "Unity Catalog" "curl -s http://localhost:$(resolve_port 8081)/api/2.1/unity-catalog/catalogs" 60
             ;;
     esac
 
@@ -654,9 +682,10 @@ cmd_start() {
         airflow)
             echo -e "${YELLOW}Starting Airflow...${NC}"
             mkdir -p logs/airflow
-            docker compose -f docker-compose-airflow.yml up -d --build
-            wait_for_service "Airflow" "curl -s http://localhost:8085/health" 120
-            echo -e "${GREEN}Airflow UI available at: http://localhost:8085${NC}"
+            overlay_set_compose_args airflow || return 1
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d --build
+            wait_for_service "Airflow" "curl -s http://localhost:$(resolve_port 8085)/health" 120
+            echo -e "${GREEN}Airflow UI available at: http://localhost:$(resolve_port 8085)${NC}"
             echo -e "${YELLOW}Default credentials: admin/admin (change in .env)${NC}"
             ;;
     esac
@@ -664,9 +693,10 @@ cmd_start() {
     case $service in
         mlflow)
             echo -e "${YELLOW}Starting MLflow...${NC}"
-            docker compose -f docker-compose-mlflow.yml up -d
-            wait_for_service "MLflow" "curl -s http://localhost:5000/health" 60
-            echo -e "${GREEN}MLflow tracking UI at: http://localhost:5000${NC}"
+            overlay_set_compose_args mlflow || return 1
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d
+            wait_for_service "MLflow" "curl -s http://localhost:$(resolve_port 5000)/health" 60
+            echo -e "${GREEN}MLflow tracking UI at: http://localhost:$(resolve_port 5000)${NC}"
             ;;
     esac
 
@@ -691,40 +721,44 @@ cmd_stop() {
     header "STOPPING SERVICES"
 
     local service=$1
-    local compose_file=$(get_spark_compose)
 
     case $service in
         spark|all)
             echo -e "${YELLOW}Stopping Spark 4.1...${NC}"
-            docker compose -f "$compose_file" down
+            overlay_set_compose_args spark41 || return 1
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down
             ;;
     esac
 
     case $service in
         kafka|all)
             echo -e "${YELLOW}Stopping Kafka...${NC}"
-            docker compose -f docker-compose-kafka.yml down
+            overlay_set_compose_args kafka || return 1
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down
             ;;
     esac
 
     case $service in
         unity-catalog|uc)
             echo -e "${YELLOW}Stopping Unity Catalog...${NC}"
-            docker compose -f docker-compose-unity-catalog.yml down
+            overlay_set_compose_args unity-catalog || return 1
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down
             ;;
     esac
 
     case $service in
         airflow)
             echo -e "${YELLOW}Stopping Airflow...${NC}"
-            docker compose -f docker-compose-airflow.yml down
+            overlay_set_compose_args airflow || return 1
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down
             ;;
     esac
 
     case $service in
         mlflow)
             echo -e "${YELLOW}Stopping MLflow...${NC}"
-            docker compose -f docker-compose-mlflow.yml down
+            overlay_set_compose_args mlflow || return 1
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down
             ;;
     esac
 
@@ -741,8 +775,8 @@ cmd_stop() {
 # Logs command
 cmd_logs() {
     local service=$1
-    local master_container=$(get_spark_master_container)
-    local worker_container=$(get_spark_worker_container)
+    local master_container=$(resolve_container_name "$(get_spark_master_container)")
+    local worker_container=$(resolve_container_name "$(get_spark_worker_container)")
 
     case $service in
         spark-master)
@@ -754,16 +788,16 @@ cmd_logs() {
             docker logs -f "$worker_container"
             ;;
         spark-connect)
-            echo -e "${YELLOW}Logs for spark-connect-41:${NC}"
-            docker logs -f spark-connect-41
+            echo -e "${YELLOW}Logs for $(resolve_container_name spark-connect-41):${NC}"
+            docker logs -f "$(resolve_container_name spark-connect-41)"
             ;;
-        kafka)            docker logs -f kafka ;;
-        zookeeper)        docker logs -f zookeeper ;;
-        unity-catalog|uc) docker logs -f unity-catalog ;;
-        mlflow)           docker logs -f mlflow ;;
-        airflow-webserver|airflow-web)    docker logs -f airflow-webserver ;;
-        airflow-scheduler|airflow-sched)  docker logs -f airflow-scheduler ;;
-        airflow-triggerer)                docker logs -f airflow-triggerer ;;
+        kafka)            docker logs -f "$(resolve_container_name kafka)" ;;
+        zookeeper)        docker logs -f "$(resolve_container_name zookeeper)" ;;
+        unity-catalog|uc) docker logs -f "$(resolve_container_name unity-catalog)" ;;
+        mlflow)           docker logs -f "$(resolve_container_name mlflow)" ;;
+        airflow-webserver|airflow-web)    docker logs -f "$(resolve_container_name airflow-webserver)" ;;
+        airflow-scheduler|airflow-sched)  docker logs -f "$(resolve_container_name airflow-scheduler)" ;;
+        airflow-triggerer)                docker logs -f "$(resolve_container_name airflow-triggerer)" ;;
         *)
             echo "Usage: lakehouse logs [spark-master|spark-worker|spark-connect|kafka|zookeeper|unity-catalog|mlflow|airflow-webserver|airflow-scheduler|airflow-triggerer]"
             exit 1
@@ -1277,6 +1311,44 @@ cmd_setup() {
 }
 
 # Help
+# Hidden introspection command for the test harness (plan T-1.5.0c). Prints the
+# effective resolution — overlay state, resolved container names, resolved published
+# ports, and per-base compose-file argument sets — without touching any service.
+# When the overlay is active it also validates that every needed overlay file exists
+# and renders (plan 1.17.2), aborting non-zero otherwise (proves U-60).
+cmd_resolve() {
+    echo "overlay_active=${OVERLAY_ACTIVE:-false}"
+    if [ "${OVERLAY_ACTIVE:-false}" = "true" ]; then
+        echo "run_id=${LAKEHOUSE_TEST_RUN_ID}"
+        echo "compose_project=${COMPOSE_PROJECT_NAME:-}"
+        overlay_validate_all_services || exit 1
+    fi
+
+    local c
+    for c in spark-master-41 spark-worker-41 spark-connect-41 kafka zookeeper \
+             unity-catalog airflow-webserver airflow-scheduler airflow-triggerer \
+             mlflow jupyter; do
+        echo "container.${c}=$(resolve_container_name "$c")"
+    done
+
+    echo "port.postgresql=$(resolve_port 5432)"
+    echo "port.seaweedfs=$(resolve_port 8333)"
+    echo "port.unity_catalog=$(resolve_port 8081)"
+    echo "port.spark_connect=$(resolve_port 15002)"
+    echo "port.spark_ui=$(resolve_port 8082)"
+    echo "port.spark_worker_ui=$(resolve_port 8083)"
+    echo "port.kafka=$(resolve_port 9092)"
+    echo "port.zookeeper=$(resolve_port 2181)"
+    echo "port.airflow=$(resolve_port 8085)"
+    echo "port.mlflow=$(resolve_port 5000)"
+
+    local svc
+    for svc in spark41 kafka unity-catalog airflow mlflow notebooks; do
+        overlay_set_compose_args "$svc" || exit 1
+        echo "compose.${svc}=${OVERLAY_COMPOSE_ARGS[*]}"
+    done
+}
+
 cmd_help() {
     cat <<'EOF'
 open-lakehouse — demo platform CLI
@@ -1347,10 +1419,17 @@ export_spark_env
 # Re-bind positional args to the flag-stripped list so `case $1` sees the command.
 set -- "${ARGS[@]}"
 
+# Overlay activation is ALL-OR-NOTHING (plan 1.17.2): if ANY LAKEHOUSE_* overlay
+# variable is set, all must be present and valid or we abort non-zero — the CLI must
+# never fall back to the real stack. A no-op (returns 0) when no overlay var is set.
+if ! overlay_validate_activation; then
+    exit 1
+fi
+
 # Let `help` and `status` bypass the local-mode guard so users can inspect state
 # without committing to a transport. All other commands enforce connect-only.
 case ${1:-help} in
-    help|status|''|-h|--help) ;;
+    help|status|__resolve|''|-h|--help) ;;
     *) require_connect_mode ;;
 esac
 
@@ -1373,5 +1452,6 @@ case ${1:-help} in
     consumer)     cmd_consumer ;;
     testdata)     cmd_testdata "${@:2}" ;;
     browsedata)   browse_tables "$2" ;;
+    __resolve)    cmd_resolve ;;
     help|*)       cmd_help ;;
 esac

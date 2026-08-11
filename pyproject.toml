@@ -110,6 +110,11 @@ markers = [
     "file_formats: mark test for file format sources",
     "table_formats: mark test for table format sources",
     "streaming: mark test for streaming sources",
+    "merge: mark test as part of the CP merge / lifecycle work (PR #0+)",
+    "storage: mark test as storage/object-store focused",
+    "network: mark test as networking focused",
+    "dashboard: mark test as dashboard focused",
+    "sharing: mark test as Delta Sharing focused",
 ]
 addopts = [
     "-v",

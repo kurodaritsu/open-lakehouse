@@ -1,0 +1,49 @@
+# Test overlay for docker-compose-mlflow.yml — see tests/overlays/README.md.
+services:
+  mlflow:
+    container_name: mlflow-server-${LAKEHOUSE_RESOURCE_SUFFIX}
+    env_file: !override
+      - path: .env
+        required: false
+    network_mode: !reset null
+    networks:
+      - default
+    # Base publishes 5000:5000; drop it — reached in-network.
+    ports: !reset null
+    environment:
+      # host-installed PostgreSQL / SeaweedFS live outside Compose (plan 1.10);
+      # reach them via the host-gateway from the bridge network.
+      POSTGRES_HOST: "host.docker.internal"
+      POSTGRES_PORT: "${POSTGRES_PORT:-5432}"
+      POSTGRES_USER: "${POSTGRES_USER:-postgres}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-}"
+      MLFLOW_PG_USER: "${MLFLOW_PG_USER:-mlflow}"
+      MLFLOW_PG_PASS: "${MLFLOW_PG_PASS:-mlflow_password}"
+      # Run-scoped tracking database and artifact bucket.
+      MLFLOW_PG_DB: "ol_test_${LAKEHOUSE_RESOURCE_SUFFIX}_mlflow"
+      MLFLOW_ARTIFACTS_DESTINATION: "s3://ol-test-${LAKEHOUSE_RESOURCE_SUFFIX}/mlflow-artifacts"
+      AWS_ACCESS_KEY_ID: "${S3_ACCESS_KEY:-admin}"
+      AWS_SECRET_ACCESS_KEY: "${S3_SECRET_KEY:-admin_password}"
+      MLFLOW_S3_ENDPOINT_URL: "http://host.docker.internal:8333"
+      MLFLOW_GATEWAY_CONFIG: "/config/gateway-config.yml"
+    extra_hosts:
+      - host.docker.internal:host-gateway
+
+  mlflow-agent:
+    container_name: spark-mlflow-agent-${LAKEHOUSE_RESOURCE_SUFFIX}
+    env_file: !override
+      - path: .env
+        required: false
+    network_mode: !reset null
+    networks:
+      - default
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow-server-${LAKEHOUSE_RESOURCE_SUFFIX}:5000
+      - SPARK_MASTER=spark://spark-master-41-${LAKEHOUSE_RESOURCE_SUFFIX}:7078
+      - LLM_MODEL=gpt-oss:20b
+      - LLM_PROVIDER=openai
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
+      - PYTHONPATH=/opt/spark/python:/opt/spark/python/lib/py4j-0.10.9.9-src.zip
+      - SPARK_HOME=/opt/spark
+    extra_hosts:
+      - host.docker.internal:host-gateway
