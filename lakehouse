@@ -31,7 +31,7 @@ NC='\033[0m' # No Color
 export DF_TOOL="df"
 check_gnutools_on_macos() {
 	DF_TOOL="gdf"
-	if [ ! $(command -v $DF_TOOL) ]
+	if ! command -v "$DF_TOOL" >/dev/null 2>&1
 	then
         echo -e "${RED}Missing GNU tools on MacOS:${NC}"
         echo -e "  ${RED}✗${NC} $DF_TOOL"
@@ -185,7 +185,7 @@ preflight_checks() {
             if nc -z localhost "$port" 2>/dev/null; then
                 # Port in use - check if it's our expected service
                 case $port in
-                    $spark_port|$spark_ui_port)
+                    "$spark_port"|"$spark_ui_port")
                         if docker ps --format '{{.Names}}' | grep -q "spark-master"; then
                             echo -e "   ${GREEN}✓${NC} Port $port ($name) - existing Spark service"
                         else
@@ -320,7 +320,8 @@ wait_for_services() {
     fi
 }
 
-# Fixed Spark 4.1 constants (this repo is Spark-4.1-only)
+# Fixed Spark 4.1 constants (this repo is Spark-4.1-only).
+# shellcheck disable=SC2034  # documentary constant; get_spark_* below are the interface
 SPARK_VERSION="4.1"
 get_spark_compose()           { echo "docker-compose-spark41.yml"; }
 get_spark_master_container()  { echo "spark-master-41"; }

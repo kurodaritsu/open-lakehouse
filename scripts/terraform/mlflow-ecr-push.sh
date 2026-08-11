@@ -22,7 +22,8 @@ cd "$ROOT"
 # Source ./.env (shared) then the recipe-specific ./.env-terraform.mlflow-ecs.
 for envfile in .env .env-terraform.mlflow-ecs; do
   if [[ -f "$envfile" ]]; then
-    set -a # shellcheck disable=SC1090,SC1091
+    set -a
+    # shellcheck disable=SC1090,SC1091
     source "$envfile"
     set +a
   fi
