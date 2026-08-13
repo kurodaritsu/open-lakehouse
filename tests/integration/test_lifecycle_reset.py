@@ -418,3 +418,34 @@ def test_i50_destructive_modes_quiesce(env):
     r = _reset(env, "--metadata", "--yes")
     assert r.returncode == 0
     assert "Quiescing" in r.stdout or "Quiescing" in r.stderr
+
+
+def test_failed_reset_writes_marker_and_leaves_stopped(env, tmp_path):
+    # A destructive reset that fails mid-operation must NOT restore services; it
+    # leaves a marker with recovery instructions (plan 1.16.5). Inject a failure
+    # via an unreachable PostgreSQL port in the effective env.
+    _seed(env)
+    marker = REPO_ROOT / ".lakehouse-reset-interrupted"
+    marker.unlink(missing_ok=True)
+    bad_env = tmp_path / "unreachable.env"
+    bad_env.write_text(
+        Path(env["overlay"]["LAKEHOUSE_ENV_FILE"])
+        .read_text()
+        .replace(f"POSTGRES_PORT={PG_PORT}", "POSTGRES_PORT=5599")
+    )
+    bad_overlay = {**env["overlay"], "LAKEHOUSE_ENV_FILE": str(bad_env)}
+    r = subprocess.run(
+        [str(LAKEHOUSE), "reset", "--metadata", "--yes"],
+        cwd=REPO_ROOT,
+        env=bad_overlay,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    try:
+        assert r.returncode != 0, "a failed reset must exit non-zero"
+        assert "left stopped" in (r.stdout + r.stderr).lower()
+        assert marker.exists(), "an interrupted-reset marker must be written"
+        assert "interrupted-reset" in marker.read_text()
+    finally:
+        marker.unlink(missing_ok=True)

@@ -115,3 +115,6 @@ docker-compose.override.yml
 
 # ─── Claude Code per-machine state ──────────────────────────────────────
 .claude/settings.local.json
+
+# Runtime marker written by a failed `./lakehouse reset` (never commit)
+.lakehouse-reset-interrupted
