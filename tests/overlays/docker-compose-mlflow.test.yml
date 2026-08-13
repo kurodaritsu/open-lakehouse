@@ -10,22 +10,18 @@ services:
       - default
     # Base publishes 5000:5000; drop it — reached in-network.
     ports: !reset null
+    # Only the run-scoped / bridge overrides are set here; every other env key
+    # (POSTGRES_USER/PASSWORD, MLFLOW_PG_USER/PASS, AWS creds, gateway config)
+    # deep-merges from the base compose file, so no credentials are duplicated
+    # into this overlay.
     environment:
       # host-installed PostgreSQL / SeaweedFS live outside Compose (plan 1.10);
       # reach them via the host-gateway from the bridge network.
       POSTGRES_HOST: "host.docker.internal"
-      POSTGRES_PORT: "${POSTGRES_PORT:-5432}"
-      POSTGRES_USER: "${POSTGRES_USER:-postgres}"
-      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-}"
-      MLFLOW_PG_USER: "${MLFLOW_PG_USER:-mlflow}"
-      MLFLOW_PG_PASS: "${MLFLOW_PG_PASS:-mlflow_password}"
+      MLFLOW_S3_ENDPOINT_URL: "http://host.docker.internal:8333"
       # Run-scoped tracking database and artifact bucket.
       MLFLOW_PG_DB: "ol_test_${LAKEHOUSE_RESOURCE_SUFFIX}_mlflow"
       MLFLOW_ARTIFACTS_DESTINATION: "s3://ol-test-${LAKEHOUSE_RESOURCE_SUFFIX}/mlflow-artifacts"
-      AWS_ACCESS_KEY_ID: "${S3_ACCESS_KEY:-admin}"
-      AWS_SECRET_ACCESS_KEY: "${S3_SECRET_KEY:-admin_password}"
-      MLFLOW_S3_ENDPOINT_URL: "http://host.docker.internal:8333"
-      MLFLOW_GATEWAY_CONFIG: "/config/gateway-config.yml"
     extra_hosts:
       - host.docker.internal:host-gateway
 
