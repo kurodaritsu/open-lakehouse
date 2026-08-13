@@ -1317,6 +1317,218 @@ cmd_setup() {
     fi
 }
 
+# ============================================================================
+# Lifecycle commands: reset / backup / restore / doctor  (PR #0, Phase 1.5)
+# ----------------------------------------------------------------------------
+# These are TOP-LEVEL COMMANDS, not services (plan 1.13.3). Each is registered at
+# four sites — argument parsing (the connect-mode bypass), a cmd_<name>() function,
+# the top-level case dispatch, and cmd_help() — never the 7-site service model, and
+# never in the start/stop/logs service dispatch.
+# ============================================================================
+
+# Detect Unity Catalog's effective state backend from CONFIG, never from volume
+# topology (T-1.5.1, plan 1.14.5). Reads the live server.properties if present,
+# else the image default (embedded H2). Prints "h2" or "postgresql:<db>".
+# Optional $1 overrides the properties path (used by unit tests).
+detect_uc_backend() {
+    local props="${1:-$PROJECT_ROOT/config/unity-catalog/server.properties}"
+    if [ -f "$props" ]; then
+        local url
+        url=$(grep -E '^[[:space:]]*hibernate\.connection\.url=jdbc:postgresql:' "$props" 2>/dev/null | head -1 || true)
+        if [ -n "$url" ]; then
+            local db="${url##*/}"      # tail after the last '/'
+            db="${db%%[!a-zA-Z0-9_]*}" # trim any trailing whitespace/comment
+            echo "postgresql:${db}"
+            return 0
+        fi
+    fi
+    # No live config, or the PostgreSQL block is commented out -> embedded H2.
+    echo "h2"
+    return 0
+}
+
+# Named volumes declared by the ACTIVE BASE compose set only — never *.test.yml
+# overlays or $LAKEHOUSE_OVERLAY_DIR (plan 1.16.6). One name per line.
+reset_discover_volumes() {
+    local f
+    for f in "$PROJECT_ROOT"/docker-compose-*.yml; do
+        case "$f" in
+            *.test.yml) continue ;;
+        esac
+        awk '
+            /^volumes:/ { inv=1; next }
+            /^[^[:space:]#]/ { inv=0 }
+            inv && /^[[:space:]]+[A-Za-z0-9_-]+:[[:space:]]*$/ {
+                name=$1; sub(/:$/,"",name); print name
+            }
+        ' "$f"
+    done | sort -u
+    return 0
+}
+
+# Which reset modes destroy a given named volume (plan 1.14.7). Prints a
+# comma-list of modes, or "never" for the explicit never-destroy list.
+reset_volume_mode() {
+    case "$1" in
+        mlflow-data)           echo "metadata,all" ;;  # tracking state (kept by --keep-mlflow)
+        uc-data)               echo "metadata,all" ;;  # catalog state (if ever mounted)
+        uc-logs)               echo "never" ;;         # diagnostics — never destroyed
+        spark-data|spark-logs) echo "data,all" ;;      # job scratch + event logs
+        *)                     echo "data,all" ;;      # default: data-plane scratch
+    esac
+    return 0
+}
+
+# PostgreSQL databases a mode drops+recreates (plan 1.13.4 as amended by 1.14.1).
+# --data preserves all databases; --metadata/--all reset UC(if PG)+airflow+iceberg
+# (+mlflow unless --keep-mlflow). Never the non-existent "unitycatalog" (plan 1.13.2).
+reset_db_targets() {
+    local mode="$1" keep_mlflow="$2"
+    case "$mode" in
+        metadata|all)
+            echo "airflow"
+            echo "iceberg_catalog"
+            if [ "$keep_mlflow" != "true" ]; then
+                echo "mlflow"
+            fi
+            local uc
+            uc=$(detect_uc_backend)
+            if [ "${uc%%:*}" = "postgresql" ]; then
+                echo "${uc#postgresql:}"
+            fi
+            ;;
+        data) : ;;  # data plane only — databases preserved
+    esac
+    return 0
+}
+
+# Emit the machine-greppable reset PLAN for a mode. Pure enumeration — issues no
+# docker/psql/rm. Tokens: "PLAN target=<class> name=<n> action=<a> [reason=<r>]".
+reset_emit_plan() {
+    local mode="$1" keep_mlflow="$2"
+    local bucket="${S3_BUCKET:-lakehouse}"
+
+    local db
+    for db in $(reset_db_targets "$mode" "$keep_mlflow"); do
+        echo "PLAN target=database name=${db} action=drop-recreate"
+    done
+
+    if [ "$mode" = "metadata" ] || [ "$mode" = "all" ]; then
+        local uc
+        uc=$(detect_uc_backend)
+        if [ "$uc" = "h2" ]; then
+            echo "PLAN target=uc-state name=h2-in-container action=reset"
+        fi
+    fi
+
+    if [ "$mode" = "data" ] || [ "$mode" = "all" ]; then
+        echo "PLAN target=s3 name=s3://${bucket}/warehouse/ action=delete"
+        echo "PLAN target=s3 name=s3://${bucket}/mlflow-artifacts/ action=delete"
+        echo "PLAN target=rows name=uc-table-registrations action=clear"
+        echo "PLAN target=rows name=mlflow-run-records action=clear"
+        echo "PLAN target=rows name=iceberg_catalog-rows action=clear"
+        echo "PLAN target=kafka name=topics+checkpoints action=reset"
+    fi
+
+    local v vmode
+    for v in $(reset_discover_volumes); do
+        vmode=$(reset_volume_mode "$v")
+        if [ "$vmode" = "never" ]; then
+            echo "PLAN target=volume name=${v} action=preserve reason=never-destroy"
+            continue
+        fi
+        if [ "$keep_mlflow" = "true" ] && [ "$v" = "mlflow-data" ]; then
+            echo "PLAN target=volume name=${v} action=preserve reason=keep-mlflow"
+            continue
+        fi
+        case ",${vmode}," in
+            *",${mode},"*) echo "PLAN target=volume name=${v} action=remove" ;;
+            *)             echo "PLAN target=volume name=${v} action=preserve reason=other-mode" ;;
+        esac
+    done
+    return 0
+}
+
+# Destructive execution — implemented in Checkpoint 3. Kept as a seam so the
+# skeleton (parsing/validation/plan/confirmation) is complete and testable now.
+reset_execute() {
+    echo "reset: destructive execution lands in Checkpoint 3 of this PR (PR #0)." >&2
+    return 3
+}
+
+# ./lakehouse reset --data|--metadata|--all [--keep-mlflow] [--dry-run] [--yes]
+# Resolves the REAL configured targets (no ^ol_test_ pattern guard — the
+# fail-closed guard lives only in the test harness, plan 1.14.3 / U-54).
+cmd_reset() {
+    local mode="" keep_mlflow=false dry_run=false assume_yes=false modes_set=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --data)        mode="data";     modes_set=$((modes_set + 1)); shift ;;
+            --metadata)    mode="metadata"; modes_set=$((modes_set + 1)); shift ;;
+            --all)         mode="all";      modes_set=$((modes_set + 1)); shift ;;
+            --keep-mlflow) keep_mlflow=true; shift ;;
+            --dry-run)     dry_run=true;     shift ;;
+            --yes|-y)      assume_yes=true;  shift ;;
+            *) echo "reset: unknown argument '$1'" >&2; return 2 ;;
+        esac
+    done
+
+    # Flag validation (T-1.5.3b, plan 1.14.9): exactly one primary mode;
+    # --keep-mlflow only with --metadata.
+    if [ "$modes_set" -ne 1 ]; then
+        echo "reset: exactly one of --data / --metadata / --all is required" >&2
+        return 2
+    fi
+    if [ "$keep_mlflow" = true ] && [ "$mode" != "metadata" ]; then
+        echo "reset: --keep-mlflow is valid only with --metadata" >&2
+        return 2
+    fi
+
+    # --dry-run enumerates the plan and changes nothing; it bypasses confirmation
+    # because it destroys nothing (plan 1.13.5).
+    if [ "$dry_run" = true ]; then
+        local label="$mode"
+        [ "$keep_mlflow" = true ] && label="$mode --keep-mlflow"
+        echo "Reset plan (mode: ${label}) — DRY RUN, no changes will be made:"
+        reset_emit_plan "$mode" "$keep_mlflow"
+        echo "No changes made (dry-run)."
+        return 0
+    fi
+
+    # Destructive path requires confirmation: --yes, or an interactive 'yes'.
+    if [ "$assume_yes" != true ]; then
+        if [ -t 0 ]; then
+            echo -e "${RED}This will PERMANENTLY reset (mode: ${mode}).${NC} Type 'yes' to proceed:"
+            local reply
+            read -r reply
+            if [ "$reply" != "yes" ]; then
+                echo "Aborted."
+                return 1
+            fi
+        else
+            echo "reset: refusing a destructive reset without --yes (non-interactive)" >&2
+            return 1
+        fi
+    fi
+
+    reset_execute "$mode" "$keep_mlflow"
+}
+
+# backup / restore / doctor — registered now (U-28) so the command surface is
+# complete; bodies land in later checkpoints of this PR.
+cmd_backup() {
+    echo "backup: implemented in Checkpoint 4 of this PR (PR #0)." >&2
+    return 3
+}
+cmd_restore() {
+    echo "restore: implemented in Checkpoint 4 of this PR (PR #0)." >&2
+    return 3
+}
+cmd_doctor() {
+    echo "doctor: implemented in Checkpoint 5 of this PR (PR #0)." >&2
+    return 3
+}
+
 # Help
 # Hidden introspection command for the test harness (plan T-1.5.0c). Prints the
 # effective resolution — overlay state, resolved container names, resolved published
@@ -1384,6 +1596,11 @@ Commands:
   consumer            Start Spark streaming consumer
   testdata <cmd>      Test data generation (generate|stream|load|stats|clean)
   browsedata [table]  Browse Iceberg table rows (default: iceberg.bronze.orders)
+  reset <mode>        Reset environment: --data | --metadata | --all
+                        [--keep-mlflow] [--dry-run] [--yes]
+  backup              Back up all databases + object store + volumes
+  restore --from <p>  Restore from a backup artifact
+  doctor              Report orphaned data / catalog inconsistencies
   help                Show this help
 
 Services:
@@ -1438,7 +1655,7 @@ fi
 # Let `help` and `status` bypass the local-mode guard so users can inspect state
 # without committing to a transport. All other commands enforce connect-only.
 case ${1:-help} in
-    help|status|__resolve|''|-h|--help) ;;
+    help|status|__resolve|reset|backup|restore|doctor|''|-h|--help) ;;
     *) require_connect_mode ;;
 esac
 
@@ -1461,6 +1678,10 @@ case ${1:-help} in
     consumer)     cmd_consumer ;;
     testdata)     cmd_testdata "${@:2}" ;;
     browsedata)   browse_tables "$2" ;;
+    reset)        cmd_reset "${@:2}" ;;
+    backup)       cmd_backup "${@:2}" ;;
+    restore)      cmd_restore "${@:2}" ;;
+    doctor)       cmd_doctor "${@:2}" ;;
     __resolve)    cmd_resolve ;;
     help|*)       cmd_help ;;
 esac

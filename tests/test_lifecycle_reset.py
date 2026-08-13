@@ -1,0 +1,257 @@
+"""Reset skeleton unit tests (PR #0, Phase 1.5, Checkpoint 2).
+
+    U-29  every stateful target is assigned or explicitly exempt
+    U-30  `reset --dry-run` destroys nothing (and lists targets)
+    U-46  UC backend detected from effective CONFIG, not volume topology
+    U-47  reset target matrix — four distinct target sets
+    U-52  flag validation
+    U-53  named volumes are assigned to a reset mode (or never-destroy)
+    U-54  production reset is NOT name-pattern restricted
+
+All unit-level: static scans of `lakehouse` + running `reset --dry-run` (which
+touches nothing). No Docker required.
+"""
+
+from __future__ import annotations
+
+import re
+import subprocess
+import tempfile
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+LAKEHOUSE = REPO_ROOT / "lakehouse"
+TEXT = LAKEHOUSE.read_text()
+
+
+def _func_body(name: str) -> str:
+    m = re.search(rf"^{re.escape(name)}\(\) \{{\n(.*?)^\}}", TEXT, re.M | re.S)
+    assert m, f"function {name}() not found"
+    return m.group(1)
+
+
+def _run(*args: str, stdin: str = "") -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [str(LAKEHOUSE), *args],
+        cwd=REPO_ROOT,
+        input=stdin,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+def _plan(mode: str, *extra: str) -> list[dict]:
+    """Run `reset <mode> --dry-run` and parse the PLAN tokens into dicts."""
+    r = _run("reset", mode, *extra, "--dry-run")
+    assert r.returncode == 0, f"dry-run failed: {r.stderr}"
+    rows = []
+    for line in r.stdout.splitlines():
+        if line.startswith("PLAN "):
+            rows.append(dict(kv.split("=", 1) for kv in line.split()[1:]))
+    return rows
+
+
+def _detect_uc_backend(props_path: str) -> str:
+    """Invoke the detect_uc_backend bash function against a props file."""
+    body = re.search(r"(^detect_uc_backend\(\) \{.*?^\})", TEXT, re.M | re.S).group(1)
+    script = f'PROJECT_ROOT={REPO_ROOT}\n{body}\ndetect_uc_backend "{props_path}"'
+    return subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, timeout=30
+    ).stdout.strip()
+
+
+# --- U-46 ------------------------------------------------------------------------
+
+
+class TestU46UCBackendDetection:
+    def test_commented_pg_block_is_h2(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".properties", delete=False) as f:
+            f.write("server.port=8080\n")
+            f.write(
+                "# hibernate.connection.url=jdbc:postgresql://h/5432/unity_catalog\n"
+            )
+            p = f.name
+        assert _detect_uc_backend(p) == "h2"
+
+    def test_uncommented_pg_url_is_postgresql(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".properties", delete=False) as f:
+            f.write(
+                "hibernate.connection.url=jdbc:postgresql://localhost:5432/unity_catalog\n"
+            )
+            p = f.name
+        assert _detect_uc_backend(p) == "postgresql:unity_catalog"
+
+    def test_missing_config_defaults_to_h2(self):
+        assert _detect_uc_backend("/nonexistent/server.properties") == "h2"
+
+    def test_detector_reads_config_not_volume_topology(self):
+        body = _func_body("detect_uc_backend")
+        # It must key off the properties file, never volume mount state.
+        assert "server.properties" in body
+        assert "uc-data" not in body and "volume" not in body.lower()
+
+    def test_never_hardcodes_nonexistent_unitycatalog_db(self):
+        assert "unitycatalog" not in _func_body("detect_uc_backend").replace(
+            "unity_catalog", ""
+        )
+
+
+# --- U-52 ------------------------------------------------------------------------
+
+
+class TestU52FlagValidation:
+    def test_requires_exactly_one_mode(self):
+        assert _run("reset", "--dry-run").returncode == 2
+        assert _run("reset", "--data", "--metadata", "--dry-run").returncode == 2
+        assert _run("reset", "--data", "--all", "--dry-run").returncode == 2
+
+    def test_keep_mlflow_only_with_metadata(self):
+        assert _run("reset", "--all", "--keep-mlflow", "--dry-run").returncode == 2
+        assert _run("reset", "--data", "--keep-mlflow", "--dry-run").returncode == 2
+        assert _run("reset", "--metadata", "--keep-mlflow", "--dry-run").returncode == 0
+
+    def test_valid_single_modes_accepted(self):
+        for mode in ("--data", "--metadata", "--all"):
+            assert _run("reset", mode, "--dry-run").returncode == 0
+
+
+# --- U-30 ------------------------------------------------------------------------
+
+
+class TestU30DryRunInert:
+    def test_dry_run_lists_targets_and_makes_no_changes(self):
+        r = _run("reset", "--all", "--dry-run")
+        assert r.returncode == 0
+        assert "DRY RUN" in r.stdout
+        assert "No changes made (dry-run)." in r.stdout
+        assert any(line.startswith("PLAN ") for line in r.stdout.splitlines())
+
+    def test_dry_run_code_path_issues_no_destructive_ops(self):
+        # The enumeration body must contain no docker/psql/rm destructive verbs.
+        body = _func_body("reset_emit_plan")
+        for forbidden in ("docker ", "psql", "rm -rf", "DROP DATABASE", "volume rm"):
+            assert forbidden not in body, f"dry-run path contains {forbidden!r}"
+
+    def test_dry_run_returns_before_destructive_execute(self):
+        # cmd_reset returns from the --dry-run branch before reset_execute is called.
+        body = _func_body("cmd_reset")
+        dry_idx = body.index('dry_run" = true')
+        exec_idx = body.index("reset_execute")
+        assert dry_idx < exec_idx, "dry-run branch must precede reset_execute"
+
+
+# --- U-47 ------------------------------------------------------------------------
+
+
+class TestU47TargetMatrix:
+    def _names(self, rows, cls, action=None):
+        return {
+            r["name"]
+            for r in rows
+            if r["target"] == cls and (action is None or r.get("action") == action)
+        }
+
+    def test_four_modes_are_distinct(self):
+        sigs = set()
+        for mode in ("--data", "--metadata", "--all"):
+            rows = _plan(mode)
+            sigs.add(frozenset((r["target"], r["name"], r["action"]) for r in rows))
+        rows_km = _plan("--metadata", "--keep-mlflow")
+        sigs.add(frozenset((r["target"], r["name"], r["action"]) for r in rows_km))
+        assert len(sigs) == 4, "the four modes must produce four distinct plans"
+
+    def test_data_deletes_objects_and_referencing_rows_not_databases(self):
+        rows = _plan("--data")
+        assert self._names(rows, "s3", "delete")  # objects deleted
+        assert "iceberg_catalog-rows" in self._names(rows, "rows", "clear")
+        assert "uc-table-registrations" in self._names(rows, "rows", "clear")
+        assert "mlflow-run-records" in self._names(rows, "rows", "clear")
+        assert not self._names(rows, "database"), "--data must not drop databases"
+
+    def test_metadata_resets_dbs_incl_iceberg_not_objects(self):
+        rows = _plan("--metadata")
+        dbs = self._names(rows, "database", "drop-recreate")
+        assert {"airflow", "iceberg_catalog", "mlflow"} <= dbs
+        assert not self._names(rows, "s3"), "--metadata must not delete S3 objects"
+
+    def test_keep_mlflow_excludes_mlflow_db_and_preserves_volume(self):
+        rows = _plan("--metadata", "--keep-mlflow")
+        assert "mlflow" not in self._names(rows, "database")
+        assert {"airflow", "iceberg_catalog"} <= self._names(rows, "database")
+        preserved = self._names(rows, "volume", "preserve")
+        assert "mlflow-data" in preserved
+
+    def test_all_is_both(self):
+        rows = _plan("--all")
+        assert self._names(rows, "s3", "delete")
+        assert {"airflow", "iceberg_catalog", "mlflow"} <= self._names(
+            rows, "database", "drop-recreate"
+        )
+
+
+# --- U-29 & U-53 -----------------------------------------------------------------
+
+
+class TestU29U53TargetInventory:
+    def _declared_volumes(self) -> set[str]:
+        vols = set()
+        for f in sorted(REPO_ROOT.glob("docker-compose-*.yml")):
+            if f.name.endswith(".test.yml"):
+                continue
+            in_vol = False
+            for line in f.read_text().splitlines():
+                if re.match(r"^volumes:", line):
+                    in_vol = True
+                    continue
+                if re.match(r"^[^\s#]", line):
+                    in_vol = False
+                if in_vol and re.match(r"^\s+[A-Za-z0-9_-]+:\s*$", line):
+                    vols.add(line.strip().rstrip(":"))
+        return vols
+
+    def test_every_declared_volume_is_assigned_or_never_destroy(self):
+        declared = self._declared_volumes()
+        assert declared, "expected some declared volumes"
+        rows = _plan("--all")
+        planned = {r["name"] for r in rows if r["target"] == "volume"}
+        # Every declared volume appears in the --all plan (removed or preserved).
+        assert declared <= planned, f"unaccounted volumes: {declared - planned}"
+
+    def test_uc_logs_is_never_destroyed(self):
+        rows = _plan("--all")
+        uc_logs = [
+            r for r in rows if r["target"] == "volume" and r["name"] == "uc-logs"
+        ]
+        assert uc_logs and uc_logs[0]["action"] == "preserve"
+        assert uc_logs[0].get("reason") == "never-destroy"
+
+    def test_db_targets_are_real_never_unitycatalog(self):
+        dbs = {r["name"] for r in _plan("--all") if r["target"] == "database"}
+        assert {"mlflow", "airflow", "iceberg_catalog"} <= dbs
+        assert "unitycatalog" not in dbs  # the non-existent DB (plan 1.13.2)
+
+    def test_inventory_excludes_overlay_volumes(self):
+        # Discovery globs docker-compose-*.yml but skips *.test.yml (plan 1.16.6).
+        body = _func_body("reset_discover_volumes")
+        assert "*.test.yml" in body
+
+
+# --- U-54 ------------------------------------------------------------------------
+
+
+class TestU54ProductionResetUnrestricted:
+    def test_cmd_reset_has_no_ol_test_pattern_guard(self):
+        body = _func_body("cmd_reset")
+        assert "ol_test_" not in body, (
+            "production cmd_reset must not carry the test-harness ^ol_test_ guard "
+            "(plan 1.14.3) — it resolves real configured targets"
+        )
+
+    def test_cmd_reset_resolves_real_configured_targets(self):
+        # The plan enumerates real names / the configured bucket, not test-scoped ones.
+        rows = _plan("--all")
+        s3 = {r["name"] for r in rows if r["target"] == "s3"}
+        assert any("lakehouse" in n for n in s3)  # default S3_BUCKET
+        dbs = {r["name"] for r in rows if r["target"] == "database"}
+        assert "mlflow" in dbs and "airflow" in dbs
