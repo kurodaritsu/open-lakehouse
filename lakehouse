@@ -1569,7 +1569,9 @@ pg_psql() {
         PGPASSWORD="${POSTGRES_PASSWORD:-}" psql -h "$host" -p "${POSTGRES_PORT:-5432}" \
             -U "${POSTGRES_USER:-postgres}" "$@"
     else
-        host="${host/localhost/host.docker.internal}"
+        # dockerized client: any host-loopback form must become the host-gateway
+        host="${host//127.0.0.1/host.docker.internal}"
+        host="${host//localhost/host.docker.internal}"
         docker run --rm -i --add-host=host.docker.internal:host-gateway \
             -e PGPASSWORD="${POSTGRES_PASSWORD:-}" \
             "${LAKEHOUSE_PG_CLIENT_IMAGE:-postgres:15-alpine}" \
@@ -1586,7 +1588,9 @@ aws_s3() {
         AWS_ACCESS_KEY_ID="${S3_ACCESS_KEY:-}" AWS_SECRET_ACCESS_KEY="${S3_SECRET_KEY:-}" \
             aws --endpoint-url "$ep" s3 "$@"
     else
-        ep="${ep/localhost/host.docker.internal}"
+        # dockerized client: any host-loopback form must become the host-gateway
+        ep="${ep//127.0.0.1/host.docker.internal}"
+        ep="${ep//localhost/host.docker.internal}"
         docker run --rm --add-host=host.docker.internal:host-gateway \
             -e AWS_ACCESS_KEY_ID="${S3_ACCESS_KEY:-}" -e AWS_SECRET_ACCESS_KEY="${S3_SECRET_KEY:-}" \
             "${LAKEHOUSE_AWSCLI_IMAGE:-amazon/aws-cli:latest}" --endpoint-url "$ep" s3 "$@"
@@ -1715,12 +1719,13 @@ reset_delete_metadata() {
         pg_drop_recreate "$eff" || return 1
     done
     # Metadata-owned named volumes (mlflow-data unless --keep-mlflow, uc-data).
-    local v vmode
+    local v vmode vname
     for v in $(reset_discover_volumes); do
         vmode=$(reset_volume_mode "$v")
         case ",${vmode}," in *",metadata,"*) ;; *) continue ;; esac
         [ "$keep_mlflow" = "true" ] && [ "$v" = "mlflow-data" ] && continue
-        docker volume rm "$(reset_effective_volume "$v")" >/dev/null 2>&1 || true
+        vname=$(reset_effective_volume "$v")
+        docker volume rm "$vname" >/dev/null 2>&1 || echo -e "  ${YELLOW}!${NC} could not remove volume $vname (in use or absent)" >&2
     done
     return 0
 }
@@ -1745,60 +1750,84 @@ reset_delete_data() {
     fi
 
     # Data-plane named volumes (spark-data, spark-logs).
-    local v vmode
+    local v vmode vname
     for v in $(reset_discover_volumes); do
         vmode=$(reset_volume_mode "$v")
         case ",${vmode}," in *",data,"*) ;; *) continue ;; esac
-        docker volume rm "$(reset_effective_volume "$v")" >/dev/null 2>&1 || true
+        vname=$(reset_effective_volume "$v")
+        docker volume rm "$vname" >/dev/null 2>&1 || echo -e "  ${YELLOW}!${NC} could not remove volume $vname (in use or absent)" >&2
     done
     return 0
 }
 
-# Clear UC table registrations via the REST API (UC stays UP in --data), keeping
-# catalogs and schemas. Best-effort; uses python3 for JSON.
+# Clear UC table registrations, keeping catalogs and schemas. Reaches the RESOLVED
+# UC container's INTERNAL REST API via `docker exec` (curl is in the UC image), never
+# a host port — under an active overlay the run-scoped UC publishes no host port, so
+# hitting localhost:8081 would clobber the PRODUCTION Unity Catalog. Skips when the
+# resolved UC container is not running.
 reset_clear_uc_registrations() {
-    local uc_url="http://localhost:$(resolve_port 8081)/api/2.1/unity-catalog"
-    python3 - "$uc_url" <<'PY' 2>/dev/null || true
-import json, sys, urllib.request
-base = sys.argv[1]
-def get(path):
+    local uc
+    uc=$(resolve_container_name unity-catalog)
+    if ! is_container_running "$uc"; then
+        return 0  # no UC to clear (its registrations live in the container's H2)
+    fi
+    local rc=0
+    UC_CONTAINER="$uc" python3 - <<'PY' 2>/dev/null || rc=$?
+import json, os, subprocess
+uc = os.environ["UC_CONTAINER"]
+api = "http://localhost:8080/api/2.1/unity-catalog"
+def curl(method, path):
+    p = subprocess.run(
+        ["docker", "exec", uc, "curl", "-s", "-X", method, api + path],
+        capture_output=True, text=True,
+    )
     try:
-        with urllib.request.urlopen(base + path, timeout=10) as r:
-            return json.load(r)
+        return json.loads(p.stdout) if p.stdout.strip() else {}
     except Exception:
         return {}
-def delete(path):
-    req = urllib.request.Request(base + path, method="DELETE")
-    try:
-        urllib.request.urlopen(req, timeout=10).read()
-    except Exception:
-        pass
-for cat in get("/catalogs").get("catalogs", []):
+for cat in curl("GET", "/catalogs").get("catalogs", []):
     c = cat["name"]
-    for sch in get(f"/schemas?catalog_name={c}").get("schemas", []):
+    for sch in curl("GET", f"/schemas?catalog_name={c}").get("schemas", []):
         s = sch["name"]
-        for tbl in get(f"/tables?catalog_name={c}&schema_name={s}").get("tables", []):
-            delete(f"/tables/{c}.{s}.{tbl['name']}")
+        for tbl in curl("GET", f"/tables?catalog_name={c}&schema_name={s}").get("tables", []):
+            curl("DELETE", f"/tables/{c}.{s}.{tbl['name']}")
 PY
+    if [ "$rc" -ne 0 ]; then
+        echo -e "  ${YELLOW}!${NC} UC registration clear may be incomplete" >&2
+    fi
     return 0
 }
 
 # Delete MLflow run records (mlflow is quiesced; act on its DB directly), keeping
-# experiments. Tolerant of MLflow-version schema differences.
+# experiments. TRUNCATE ... CASCADE removes runs plus every FK-dependent row
+# (metrics/params/tags/latest_metrics/inputs/input_tags) in one operation with
+# correct ordering — an ordered DELETE would trip MLflow's foreign keys. A no-op
+# when the MLflow schema is absent; a genuine failure is surfaced, not swallowed.
 reset_clear_mlflow_runs() {
-    local db t
+    local db
     db=$(reset_effective_db mlflow)
-    for t in latest_metrics metrics params tags inputs input_tags runs; do
-        pg_psql -d "$db" -c "DELETE FROM ${t};" >/dev/null 2>&1 || true
-    done
+    if [ -z "$(pg_psql -d "$db" -tAc "SELECT to_regclass('runs')" 2>/dev/null | tr -d '[:space:]')" ]; then
+        return 0  # no runs table -> nothing to clear
+    fi
+    if ! pg_psql -d "$db" -c "TRUNCATE TABLE runs CASCADE;" >/dev/null 2>&1; then
+        echo -e "  ${YELLOW}!${NC} failed to clear MLflow run records in ${db}" >&2
+        return 1
+    fi
     return 0
 }
 
-# Delete Iceberg JDBC-catalog table rows, keeping the database/namespaces.
+# Delete Iceberg JDBC-catalog table rows, keeping the database/namespaces. No-op if
+# the catalog table is absent; a genuine failure is surfaced.
 reset_clear_iceberg_rows() {
     local db
     db=$(reset_effective_db iceberg_catalog)
-    pg_psql -d "$db" -c "DELETE FROM iceberg_tables;" >/dev/null 2>&1 || true
+    if [ -z "$(pg_psql -d "$db" -tAc "SELECT to_regclass('iceberg_tables')" 2>/dev/null | tr -d '[:space:]')" ]; then
+        return 0
+    fi
+    if ! pg_psql -d "$db" -c "DELETE FROM iceberg_tables;" >/dev/null 2>&1; then
+        echo -e "  ${YELLOW}!${NC} failed to clear iceberg_catalog rows in ${db}" >&2
+        return 1
+    fi
     return 0
 }
 

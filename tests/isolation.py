@@ -24,9 +24,11 @@ import tempfile
 RUN_ID_ENV = "LAKEHOUSE_TEST_RUN_ID"
 RUN_ID_RE = re.compile(r"^[a-z0-9]{8,16}$")
 
-# The PostgreSQL databases and S3 bucket a full test run owns. Kept in sync with the
-# per-base overlays under tests/overlays/ and with scripts/lib/overlay.sh.
-_DB_SUFFIXES = ("mlflow", "airflow", "iceberg")
+# The PostgreSQL databases a full test run owns. These MUST match the reset engine's
+# effective DB names (reset_effective_db in `lakehouse`): ol_test_<runid>_<base> for
+# base in {mlflow, airflow, iceberg_catalog}. The base names mirror the platform's
+# real databases (mlflow, airflow, iceberg_catalog).
+_DB_SUFFIXES = ("mlflow", "airflow", "iceberg_catalog")
 
 
 class IsolationError(AssertionError):
