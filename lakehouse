@@ -572,6 +572,17 @@ check_port_available() {
 check_ports_for_service() {
     local service=$1
     local has_conflicts=0
+
+    # Under an active test overlay the stack runs on a project-scoped bridge
+    # network and publishes NO host ports (plan 1.17.1) — so host-port conflicts
+    # with the production stack cannot occur, and checking the base host ports
+    # here would spuriously block startup (the production service legitimately
+    # holds them). Skip the host-port pre-flight in overlay mode.
+    if [ "${OVERLAY_ACTIVE:-false}" = "true" ]; then
+        echo -e "${YELLOW}Overlay active — skipping host-port pre-flight (bridge network, no published ports).${NC}"
+        return 0
+    fi
+
     local spark_port=$(get_spark_port)
     local spark_ui_port=$(get_spark_ui_port)
     local master_container worker_container

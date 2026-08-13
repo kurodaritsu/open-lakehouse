@@ -110,3 +110,14 @@ class TestContainerRefsAreOverlayResolved:
         # `grep -q '^<base>$'` against `docker ps` must use the resolved name var.
         bad = re.findall(rf"grep -q ['\"]\^(?:{alt})\$['\"]", TEXT)
         assert not bad, f"raw literal container names in docker ps greps: {bad}"
+
+    def test_port_preflight_skips_under_active_overlay(self):
+        # The overlay stack uses a project-scoped bridge and publishes no host
+        # ports, so the host-port pre-flight must short-circuit when the overlay
+        # is active — else the production stack's ports spuriously block startup.
+        body = _func_body("check_ports_for_service")
+        m = re.search(r"OVERLAY_ACTIVE.*?\n(.*?\n)?\s*return 0", body, re.S)
+        assert m, "check_ports_for_service must early-return under OVERLAY_ACTIVE"
+        assert body.index("OVERLAY_ACTIVE") < body.index(
+            "check_port_available"
+        ), "the overlay skip must precede any host-port check"
