@@ -1763,34 +1763,35 @@ reset_delete_data() {
 # Clear UC table registrations, keeping catalogs and schemas. Reaches the RESOLVED
 # UC container's INTERNAL REST API via `docker exec` (curl is in the UC image), never
 # a host port — under an active overlay the run-scoped UC publishes no host port, so
-# hitting localhost:8081 would clobber the PRODUCTION Unity Catalog. Skips when the
+# hitting localhost:8081 would clobber the PRODUCTION Unity Catalog. It runs a small
+# python client that SHARES the resolved UC container's network namespace
+# (`docker run --network container:<uc>`), so localhost:8080 is always that exact
+# UC — the run-scoped one under an overlay, production otherwise — with no host-port
+# dependency (the UC image itself ships neither curl nor python). Skips when the
 # resolved UC container is not running.
 reset_clear_uc_registrations() {
-    local uc
+    local uc img rc=0
     uc=$(resolve_container_name unity-catalog)
     if ! is_container_running "$uc"; then
         return 0  # no UC to clear (its registrations live in the container's H2)
     fi
-    local rc=0
-    UC_CONTAINER="$uc" python3 - <<'PY' 2>/dev/null || rc=$?
-import json, os, subprocess
-uc = os.environ["UC_CONTAINER"]
+    img="${LAKEHOUSE_HTTP_IMAGE:-python:3-alpine}"
+    docker run -i --rm --network "container:${uc}" --entrypoint python3 "$img" - <<'PY' 2>/dev/null || rc=$?
+import json, urllib.request
 api = "http://localhost:8080/api/2.1/unity-catalog"
-def curl(method, path):
-    p = subprocess.run(
-        ["docker", "exec", uc, "curl", "-s", "-X", method, api + path],
-        capture_output=True, text=True,
-    )
+def req(method, path):
+    r = urllib.request.Request(api + path, method=method)
     try:
-        return json.loads(p.stdout) if p.stdout.strip() else {}
+        with urllib.request.urlopen(r, timeout=10) as x:
+            return json.load(x) if method == "GET" else {}
     except Exception:
         return {}
-for cat in curl("GET", "/catalogs").get("catalogs", []):
+for cat in req("GET", "/catalogs").get("catalogs", []):
     c = cat["name"]
-    for sch in curl("GET", f"/schemas?catalog_name={c}").get("schemas", []):
+    for sch in req("GET", f"/schemas?catalog_name={c}").get("schemas", []):
         s = sch["name"]
-        for tbl in curl("GET", f"/tables?catalog_name={c}&schema_name={s}").get("tables", []):
-            curl("DELETE", f"/tables/{c}.{s}.{tbl['name']}")
+        for tbl in req("GET", f"/tables?catalog_name={c}&schema_name={s}").get("tables", []):
+            req("DELETE", f"/tables/{c}.{s}.{tbl['name']}")
 PY
     if [ "$rc" -ne 0 ]; then
         echo -e "  ${YELLOW}!${NC} UC registration clear may be incomplete" >&2
