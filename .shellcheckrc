@@ -1,11 +1,14 @@
 # ShellCheck configuration for open-lakehouse.
 #
 # SC2155 — "Declare and assign separately to avoid masking return values."
-# This repo's shell (the `lakehouse` CLI in particular) uses the `local x=$(cmd)`
-# idiom pervasively for command substitutions whose exit status is never consulted
-# (e.g. `local port=$(get_spark_port)`), so the masking SC2155 warns about is benign
-# here. Accepting it as house style keeps the `shellcheck --severity=warning` gate in
-# .pre-commit-config.yaml green while still catching every genuine issue. Real
-# correctness findings (word splitting, quoting, parse errors, dead code) are fixed
-# in the code rather than suppressed.
+# Applied REPO-WIDE and deliberately: ShellCheck's rc file has no per-path scoping,
+# and every shell script here (the `lakehouse` CLI plus scripts/*) uses the
+# `local x=$(cmd)` idiom for command substitutions whose exit status is never
+# consulted (e.g. `local port=$(get_spark_port)`), so the masking is benign across
+# the tree. This keeps the `shellcheck --severity=warning` gate in
+# .pre-commit-config.yaml green as house style. Trade-off: a genuinely dangerous
+# `local x=$(cmd_whose_exit_matters)` would not be flagged — so where a command's
+# exit status DOES matter, split declare/assign explicitly rather than relying on
+# this. Real correctness findings (word splitting, quoting, parse errors, dead code)
+# are fixed in the code, never suppressed.
 disable=SC2155

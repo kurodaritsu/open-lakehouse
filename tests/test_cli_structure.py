@@ -79,3 +79,34 @@ class TestU28LifecycleCommandsAreTopLevel:
         r = _run("reset", "--all", "--dry-run", stdin="")
         assert r.returncode == 0, f"reset --all --dry-run should succeed: {r.stderr}"
         assert "DRY RUN" in r.stdout
+
+
+class TestContainerRefsAreOverlayResolved:
+    """Regression guard (plan 1.17.4): every docker exec/logs/ps container
+    reference resolves through resolve_container_name so an active test overlay
+    never probes or execs the wrong (production) stack. Base container literals
+    may appear ONLY as an argument to resolve_container_name."""
+
+    BASE_NAMES = (
+        "spark-master-41",
+        "spark-worker-41",
+        "spark-connect-41",
+        "kafka",
+        "zookeeper",
+        "unity-catalog",
+        "airflow-webserver",
+        "airflow-scheduler",
+        "airflow-triggerer",
+        "jupyter",
+    )
+
+    def test_no_raw_literal_in_docker_exec_or_logs(self):
+        alt = "|".join(re.escape(n) for n in self.BASE_NAMES)
+        bad = re.findall(rf"docker (?:exec|logs)(?:\s+-\S+)*\s+({alt})\b", TEXT)
+        assert not bad, f"raw literal container names in docker exec/logs: {bad}"
+
+    def test_no_raw_literal_in_docker_ps_grep(self):
+        alt = "|".join(re.escape(n) for n in self.BASE_NAMES)
+        # `grep -q '^<base>$'` against `docker ps` must use the resolved name var.
+        bad = re.findall(rf"grep -q ['\"]\^(?:{alt})\$['\"]", TEXT)
+        assert not bad, f"raw literal container names in docker ps greps: {bad}"

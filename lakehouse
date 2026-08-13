@@ -47,7 +47,9 @@ check_cmd() {
 # Browse Iceberg data
 browse_tables() {
     local table="${1:-iceberg.bronze.orders}"
-    docker exec -it spark-master-41 sh -c "/opt/spark/bin/spark-sql -e \"select * from ${table} limit 10;\""
+    local master
+    master=$(resolve_container_name "$(get_spark_master_container)")
+    docker exec -it "$master" sh -c "/opt/spark/bin/spark-sql -e \"select * from ${table} limit 10;\""
 }
 
 # Setup PostgreSQL database (create if not exists)
@@ -193,7 +195,7 @@ preflight_checks() {
                         fi
                         ;;
                     9092)
-                        if docker ps --format '{{.Names}}' | grep -q "^kafka$"; then
+                        if docker ps --format '{{.Names}}' | grep -q "^$(resolve_container_name kafka)$"; then
                             echo -e "   ${GREEN}✓${NC} Port $port ($name) - existing Kafka service"
                         else
                             echo -e "   ${YELLOW}!${NC} Port $port ($name) already in use"
@@ -572,8 +574,9 @@ check_ports_for_service() {
     local has_conflicts=0
     local spark_port=$(get_spark_port)
     local spark_ui_port=$(get_spark_ui_port)
-    local master_container=$(get_spark_master_container)
-    local worker_container=$(get_spark_worker_container)
+    local master_container worker_container
+    master_container=$(resolve_container_name "$(get_spark_master_container)")
+    worker_container=$(resolve_container_name "$(get_spark_worker_container)")
 
     echo -e "${YELLOW}Checking port availability...${NC}"
 
@@ -602,14 +605,14 @@ check_ports_for_service() {
 
     case $service in
         kafka|all)
-            if ! check_port_available 9092 "kafka"; then
+            if ! check_port_available 9092 "$(resolve_container_name kafka)"; then
                 echo -e "  ${RED}✗${NC} Port 9092 (Kafka) blocked by another process"
                 has_conflicts=1
             else
                 echo -e "  ${GREEN}✓${NC} Port 9092 (Kafka) available"
             fi
 
-            if ! check_port_available 2181 "zookeeper"; then
+            if ! check_port_available 2181 "$(resolve_container_name zookeeper)"; then
                 echo -e "  ${RED}✗${NC} Port 2181 (Zookeeper) blocked by another process"
                 has_conflicts=1
             else
@@ -620,7 +623,7 @@ check_ports_for_service() {
 
     case $service in
         unity-catalog|uc)
-            if ! check_port_available 8081 "unity-catalog"; then
+            if ! check_port_available 8081 "$(resolve_container_name unity-catalog)"; then
                 echo -e "  ${RED}✗${NC} Port 8081 (Unity Catalog) blocked by another process"
                 has_conflicts=1
             else
@@ -816,7 +819,16 @@ cmd_logs() {
 cmd_test() {
     set +e  # Disable exit on error for tests
     header "RUNNING TESTS"
-    local master_container=$(get_spark_master_container)
+    # Resolve container names through the overlay layer (base names on the default
+    # path; run-scoped under an active test overlay) so `test` never probes/execs
+    # the wrong stack (plan 1.17.4).
+    local master_container kafka_ctr uc_ctr aflow_web_ctr aflow_sched_ctr connect_ctr
+    master_container=$(resolve_container_name "$(get_spark_master_container)")
+    kafka_ctr=$(resolve_container_name kafka)
+    uc_ctr=$(resolve_container_name unity-catalog)
+    aflow_web_ctr=$(resolve_container_name airflow-webserver)
+    aflow_sched_ctr=$(resolve_container_name airflow-scheduler)
+    connect_ctr=$(resolve_container_name spark-connect-41)
     local failures=0
 
     echo -e "${YELLOW}1. Testing PostgreSQL connection...${NC}"
@@ -843,12 +855,12 @@ cmd_test() {
     fi
 
     echo -e "\n${YELLOW}3. Testing Kafka...${NC}"
-    if docker ps --format '{{.Names}}' | grep -q '^kafka$'; then
-        if docker exec kafka kafka-topics --list --bootstrap-server localhost:9092 >/dev/null 2>&1; then
+    if docker ps --format '{{.Names}}' | grep -q "^${kafka_ctr}$"; then
+        if docker exec "$kafka_ctr" kafka-topics --list --bootstrap-server localhost:9092 >/dev/null 2>&1; then
             echo -e "   ${GREEN}✓${NC} Kafka broker healthy"
         else
             echo -e "   ${RED}✗${NC} Kafka broker not responding"
-            echo -e "   ${YELLOW}→ Check: docker logs kafka${NC}"
+            echo -e "   ${YELLOW}→ Check: docker logs ${kafka_ctr}${NC}"
             ((failures++))
         fi
     else
@@ -877,12 +889,12 @@ cmd_test() {
         echo -e "   ${GREEN}✓${NC} Spark Connect listening on $(get_spark_remote)"
     else
         echo -e "   ${RED}✗${NC} Spark Connect not reachable on port $(get_spark_connect_port)"
-        echo -e "   ${YELLOW}→ Check: docker logs spark-connect-41${NC}"
+        echo -e "   ${YELLOW}→ Check: docker logs ${connect_ctr}${NC}"
         ((failures++))
     fi
 
     echo -e "\n${YELLOW}5. Testing Unity Catalog (optional)...${NC}"
-    if docker ps --format '{{.Names}}' | grep -q '^unity-catalog$'; then
+    if docker ps --format '{{.Names}}' | grep -q "^${uc_ctr}$"; then
         if curl -s --connect-timeout 5 http://localhost:8081/api/2.1/unity-catalog/catalogs > /dev/null 2>&1; then
             echo -e "   ${GREEN}✓${NC} Unity Catalog REST API healthy"
             # Test Iceberg REST endpoint
@@ -893,7 +905,7 @@ cmd_test() {
             fi
         else
             echo -e "   ${RED}✗${NC} Unity Catalog not responding"
-            echo -e "   ${YELLOW}→ Check: docker logs unity-catalog${NC}"
+            echo -e "   ${YELLOW}→ Check: docker logs ${uc_ctr}${NC}"
             ((failures++))
         fi
     else
@@ -902,10 +914,10 @@ cmd_test() {
     fi
 
     echo -e "\n${YELLOW}6. Testing Airflow (optional)...${NC}"
-    if docker ps --format '{{.Names}}' | grep -q '^airflow-webserver$'; then
+    if docker ps --format '{{.Names}}' | grep -q "^${aflow_web_ctr}$"; then
         if curl -s --connect-timeout 5 http://localhost:8085/health | grep -q '"healthy"'; then
             echo -e "   ${GREEN}✓${NC} Airflow webserver healthy"
-            if docker ps --format '{{.Names}}' | grep -q '^airflow-scheduler$'; then
+            if docker ps --format '{{.Names}}' | grep -q "^${aflow_sched_ctr}$"; then
                 echo -e "   ${GREEN}✓${NC} Airflow scheduler running"
             else
                 echo -e "   ${RED}✗${NC} Airflow scheduler not running"
@@ -913,7 +925,7 @@ cmd_test() {
             fi
         else
             echo -e "   ${RED}✗${NC} Airflow webserver not responding"
-            echo -e "   ${YELLOW}→ Check: docker logs airflow-webserver${NC}"
+            echo -e "   ${YELLOW}→ Check: docker logs ${aflow_web_ctr}${NC}"
             ((failures++))
         fi
     else
@@ -943,7 +955,8 @@ cmd_producer() {
 # Consumer command
 cmd_consumer() {
     header "STARTING SPARK CONSUMER"
-    local master_container=$(get_spark_master_container)
+    local master_container
+    master_container=$(resolve_container_name "$(get_spark_master_container)")
     local kafka_package="org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.0"
 
     echo -e "${YELLOW}Using Spark 4.1 ($master_container)${NC}"
@@ -969,7 +982,8 @@ cmd_testdata() {
             ;;
         load)
             header "LOADING TO ICEBERG"
-            local master_container=$(get_spark_master_container)
+            local master_container
+            master_container=$(resolve_container_name "$(get_spark_master_container)")
             if [ -f "data/load_to_iceberg.py" ]; then
                 # Copy load script to scripts dir (which is mounted in container)
                 cp data/load_to_iceberg.py scripts/_load_to_iceberg.py
@@ -1336,10 +1350,16 @@ detect_uc_backend() {
         local url
         url=$(grep -E '^[[:space:]]*hibernate\.connection\.url=jdbc:postgresql:' "$props" 2>/dev/null | head -1 || true)
         if [ -n "$url" ]; then
-            local db="${url##*/}"      # tail after the last '/'
+            local db=""
+            case "$url" in
+                */*) db="${url##*/}" ;;  # standard form jdbc:postgresql://host:port/<db>
+                *)   db="${url##*:}" ;;  # slash-less form jdbc:postgresql:<db>
+            esac
             db="${db%%[!a-zA-Z0-9_]*}" # trim any trailing whitespace/comment
-            echo "postgresql:${db}"
-            return 0
+            if [ -n "$db" ]; then
+                echo "postgresql:${db}"
+                return 0
+            fi
         fi
     fi
     # No live config, or the PostgreSQL block is commented out -> embedded H2.
@@ -1550,6 +1570,12 @@ cmd_resolve() {
         echo "container.${c}=$(resolve_container_name "$c")"
     done
 
+    # Port arithmetic (base [+ offset]) for reference only. NOTE: the shipped test
+    # overlays use bridge networking and publish NO host ports (plan 1.17.1) — a
+    # test that needs host reachability publishes its own port at this offset. So
+    # these values are the resolver's arithmetic, not live connection targets, and
+    # runtime health probes deliberately use the fixed base ports.
+    echo "ports_published_by_overlays=none"
     # PostgreSQL and SeaweedFS are host-installed (outside Compose): fixed ports,
     # never offset. Only containerized services can take a port offset.
     echo "port.postgresql=5432"
