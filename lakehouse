@@ -5,8 +5,17 @@ set -e
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_ROOT"
 
-# Load environment variables from .env if it exists
-if [ -f "$PROJECT_ROOT/.env" ]; then
+# Load environment variables. When an explicit LAKEHOUSE_ENV_FILE is set (test
+# overlay / fixtures, plan 1.16.1) it REPLACES .env, so production .env values do
+# not leak into an overlay-scoped run; otherwise the default .env is used.
+if [ -n "${LAKEHOUSE_ENV_FILE:-}" ]; then
+    if [ -f "$LAKEHOUSE_ENV_FILE" ]; then
+        set -a
+        # shellcheck disable=SC1090  # path is user-provided by design (test overlay)
+        source "$LAKEHOUSE_ENV_FILE"
+        set +a
+    fi
+elif [ -f "$PROJECT_ROOT/.env" ]; then
     set -a
     source "$PROJECT_ROOT/.env"
     set +a
@@ -1433,15 +1442,81 @@ reset_db_targets() {
     return 0
 }
 
+# Effective (overlay-aware) target NAMES. Under an active overlay every target is
+# run-scoped (and re-checked by the semantic gate, plan 1.18.2); otherwise these are
+# the real configured names. Deriving from the run-id under overlay means production
+# .env values cannot leak in.
+reset_effective_bucket() {
+    if [ "${OVERLAY_ACTIVE:-false}" = "true" ]; then
+        echo "${S3_BUCKET:-ol-test-${LAKEHOUSE_TEST_RUN_ID}}"
+    else
+        echo "${S3_BUCKET:-lakehouse}"
+    fi
+}
+
+# $1 = logical base DB (airflow | iceberg_catalog | mlflow | <uc-pg-db>)
+reset_effective_db() {
+    local base="$1"
+    if [ "${OVERLAY_ACTIVE:-false}" = "true" ]; then
+        case "$base" in
+            mlflow) echo "${MLFLOW_PG_DB:-ol_test_${LAKEHOUSE_TEST_RUN_ID}_mlflow}" ;;
+            *)      echo "ol_test_${LAKEHOUSE_TEST_RUN_ID}_${base}" ;;
+        esac
+    else
+        case "$base" in
+            mlflow) echo "${MLFLOW_PG_DB:-mlflow}" ;;
+            *)      echo "$base" ;;
+        esac
+    fi
+}
+
+# $1 = short volume name -> the physical docker volume name (project-prefixed).
+reset_effective_volume() {
+    local proj="${COMPOSE_PROJECT_NAME:-$(basename "$PROJECT_ROOT")}"
+    echo "${proj}_$1"
+}
+
+# Human-readable total size of an S3 prefix (best-effort; "unknown" if unreachable).
+reset_s3_prefix_size() {
+    local prefix="$1" line
+    line=$(aws_s3 ls "$prefix" --recursive --summarize 2>/dev/null | grep -i 'Total Size:' | tail -1 || true)
+    if [ -n "$line" ]; then
+        echo "${line##*: }"
+    else
+        echo "unknown"
+    fi
+}
+
+# The classified orphan warning a --metadata reset must print (T-1.5.7, D7). It
+# reports the THREE classes a metadata reset actually CREATES (plan 1.16.7) —
+# recoverable Delta, doubtful Iceberg, unrecoverable MLflow artifacts (with a byte
+# size) — NOT the dangling-catalog class (that is pre-existing/manual). With
+# --keep-mlflow the unrecoverable-MLflow class is suppressed: two classes (1.15.6).
+reset_metadata_warning() {
+    local keep_mlflow="$1" bucket
+    bucket=$(reset_effective_bucket)
+    echo "WARNING: --metadata drops catalog/tracking metadata but KEEPS object storage."
+    echo "  Objects left orphaned under s3://${bucket}/warehouse/, by recoverability:"
+    echo "  [recoverable]   Delta table prefixes — re-registerable from the Delta transaction log (tooling arrives in a later phase)."
+    echo "  [doubtful]      Iceberg table prefixes — UC OSS 0.4.x exposes no Iceberg write endpoints, so re-registration may be impossible."
+    if [ "$keep_mlflow" != "true" ]; then
+        local size
+        size=$(reset_s3_prefix_size "s3://${bucket}/mlflow-artifacts/")
+        echo "  [UNRECOVERABLE] MLflow artifacts under s3://${bucket}/mlflow-artifacts/ (${size}) — the Postgres run records that indexed them are being dropped; the bytes become unreachable."
+    fi
+    return 0
+}
+
 # Emit the machine-greppable reset PLAN for a mode. Pure enumeration — issues no
 # docker/psql/rm. Tokens: "PLAN target=<class> name=<n> action=<a> [reason=<r>]".
 reset_emit_plan() {
     local mode="$1" keep_mlflow="$2"
-    local bucket="${S3_BUCKET:-lakehouse}"
+    local bucket
+    bucket=$(reset_effective_bucket)
 
     local db
     for db in $(reset_db_targets "$mode" "$keep_mlflow"); do
-        echo "PLAN target=database name=${db} action=drop-recreate"
+        echo "PLAN target=database name=$(reset_effective_db "$db") action=drop-recreate"
     done
 
     if [ "$mode" = "metadata" ] || [ "$mode" = "all" ]; then
@@ -1480,11 +1555,285 @@ reset_emit_plan() {
     return 0
 }
 
-# Destructive execution — implemented in Checkpoint 3. Kept as a seam so the
-# skeleton (parsing/validation/plan/confirmation) is complete and testable now.
+# --- destructive engine (Checkpoint 3) --------------------------------------------
+
+# Run psql against the configured PostgreSQL. Prefers a host psql (OL's documented
+# setup); falls back to a dockerized client so reset works with no host pg client
+# (plan 1.17.9 — installing tooling is an impl detail). Host mapping: host psql
+# reaches the host DB at localhost; the dockerized client reaches it via the
+# host-gateway. All args forwarded to psql.
+pg_psql() {
+    local host="${POSTGRES_HOST:-localhost}"
+    if command -v psql >/dev/null 2>&1; then
+        host="${host/host.docker.internal/localhost}"
+        PGPASSWORD="${POSTGRES_PASSWORD:-}" psql -h "$host" -p "${POSTGRES_PORT:-5432}" \
+            -U "${POSTGRES_USER:-postgres}" "$@"
+    else
+        host="${host/localhost/host.docker.internal}"
+        docker run --rm -i --add-host=host.docker.internal:host-gateway \
+            -e PGPASSWORD="${POSTGRES_PASSWORD:-}" \
+            "${LAKEHOUSE_PG_CLIENT_IMAGE:-postgres:15-alpine}" \
+            psql -h "$host" -p "${POSTGRES_PORT:-5432}" -U "${POSTGRES_USER:-postgres}" "$@"
+    fi
+}
+
+# Run `aws s3 ...` against the configured S3/SeaweedFS. Prefers host aws; falls back
+# to a dockerized aws-cli. Endpoint host mapping mirrors pg_psql.
+aws_s3() {
+    local ep="${S3_ENDPOINT:-http://localhost:8333}"
+    if command -v aws >/dev/null 2>&1; then
+        ep="${ep/host.docker.internal/localhost}"
+        AWS_ACCESS_KEY_ID="${S3_ACCESS_KEY:-}" AWS_SECRET_ACCESS_KEY="${S3_SECRET_KEY:-}" \
+            aws --endpoint-url "$ep" s3 "$@"
+    else
+        ep="${ep/localhost/host.docker.internal}"
+        docker run --rm --add-host=host.docker.internal:host-gateway \
+            -e AWS_ACCESS_KEY_ID="${S3_ACCESS_KEY:-}" -e AWS_SECRET_ACCESS_KEY="${S3_SECRET_KEY:-}" \
+            "${LAKEHOUSE_AWSCLI_IMAGE:-amazon/aws-cli:latest}" --endpoint-url "$ep" s3 "$@"
+    fi
+}
+
+# Safe DROP sequence (T-1.5.4): capture owner -> terminate live backends -> DROP ->
+# CREATE with the original owner. Survives open connections to the target DB.
+pg_drop_recreate() {
+    local db="$1" owner
+    owner=$(pg_psql -d postgres -tAc \
+        "SELECT pg_catalog.pg_get_userbyid(datdba) FROM pg_database WHERE datname='${db}'" \
+        2>/dev/null | tr -d '[:space:]' || true)
+    pg_psql -d postgres -c \
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${db}' AND pid <> pg_backend_pid();" \
+        >/dev/null 2>&1 || true
+    pg_psql -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS \"${db}\";" || return 1
+    if [ -n "$owner" ]; then
+        pg_psql -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"${db}\" OWNER \"${owner}\";" || return 1
+    else
+        pg_psql -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"${db}\";" || return 1
+    fi
+    return 0
+}
+
+# Runtime semantic validation (plan 1.18.2, U-66b/I-55). ONLY when the overlay is
+# active: resolve the effective targets and abort unless every database, bucket,
+# volume, and container name derives from the current run-id. Overlay-inactive
+# production reset is unrestricted (must not reintroduce the 1.14.3 defect).
+reset_semantic_gate() {
+    [ "${OVERLAY_ACTIVE:-false}" = "true" ] || return 0
+    local rid="${LAKEHOUSE_TEST_RUN_ID}"
+    local dbs buckets volumes containers v
+    dbs="$(reset_effective_db airflow) $(reset_effective_db iceberg_catalog) $(reset_effective_db mlflow)"
+    local uc
+    uc=$(detect_uc_backend)
+    [ "${uc%%:*}" = "postgresql" ] && dbs="$dbs $(reset_effective_db "${uc#postgresql:}")"
+    buckets="$(reset_effective_bucket)"
+    volumes=""
+    for v in $(reset_discover_volumes); do
+        volumes="$volumes $(reset_effective_volume "$v")"
+    done
+    containers="$(resolve_container_name spark-master-41) $(resolve_container_name kafka) \
+$(resolve_container_name unity-catalog) $(resolve_container_name mlflow) \
+$(resolve_container_name airflow-webserver)"
+    if ! overlay_validate_targets --runid "$rid" --active true \
+        --databases "$dbs" --buckets "$buckets" --volumes "$volumes" --containers "$containers"; then
+        echo -e "${RED}reset: overlay semantic validation FAILED${NC} — a resolved target is not scoped to run-id '${rid}'. Refusing to touch anything." >&2
+        return 1
+    fi
+    return 0
+}
+
+# The service keys currently running (by resolved container name), for restore.
+reset_running_services() {
+    local up=""
+    is_container_running "$(resolve_container_name spark-master-41)" && up="$up spark" || true
+    is_container_running "$(resolve_container_name kafka)" && up="$up kafka" || true
+    is_container_running "$(resolve_container_name unity-catalog)" && up="$up unity-catalog" || true
+    is_container_running "$(resolve_container_name airflow-webserver)" && up="$up airflow" || true
+    is_container_running "$(resolve_container_name mlflow)" && up="$up mlflow" || true
+    echo "$up"
+    return 0
+}
+
+reset_stop_services() {
+    local s
+    for s in "$@"; do
+        echo -e "${YELLOW}Quiescing ${s}...${NC}"
+        cmd_stop "$s" >/dev/null 2>&1 || true
+    done
+    return 0
+}
+
+# Quiesce the services that WRITE to a mode's targets (plan 1.15.3). --data keeps
+# Unity Catalog UP (its registrations are cleared via REST); --metadata stops the
+# DB clients; --all stops everything.
+reset_quiesce() {
+    case "$1" in
+        data)     reset_stop_services spark kafka mlflow airflow ;;
+        metadata) reset_stop_services unity-catalog mlflow airflow ;;
+        all)      reset_stop_services spark kafka unity-catalog mlflow airflow ;;
+    esac
+    return 0
+}
+
+# Restore the previously-running set — ONLY on success (plan 1.16.5 / 1.19.3).
+reset_restore_services() {
+    local s
+    for s in $1; do
+        echo -e "${YELLOW}Restarting ${s}...${NC}"
+        cmd_start "$s" >/dev/null 2>&1 || echo -e "  ${YELLOW}!${NC} ${s} did not come back cleanly; check ./lakehouse status"
+    done
+    return 0
+}
+
+reset_marker_path() { echo "$PROJECT_ROOT/.lakehouse-reset-interrupted"; }
+
+# On a FAILED destructive reset, leave services stopped and drop a marker with
+# recovery instructions (plan 1.16.5). doctor reports it in Checkpoint 5.
+reset_write_marker() {
+    local mode="$1"
+    cat > "$(reset_marker_path)" <<EOF
+interrupted-reset
+mode=${mode}
+timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+overlay_active=${OVERLAY_ACTIVE:-false}
+note=A destructive reset failed mid-operation. Services were left STOPPED to avoid
+note=compounding corruption by writing against half-deleted state. Inspect state,
+note=then restore from a backup ('./lakehouse restore --from <path>') or re-run reset.
+EOF
+    return 0
+}
+
+# --- per-mode deletions -----------------------------------------------------------
+
+# Metadata plane: drop+recreate the catalog/tracking databases, and remove the
+# metadata volumes. UC-on-H2 state is reset by the quiesce (down removes the
+# container + its ephemeral H2); a PostgreSQL-backed UC DB is dropped here.
+reset_delete_metadata() {
+    local keep_mlflow="$1" db
+    for db in $(reset_db_targets metadata "$keep_mlflow"); do
+        local eff
+        eff=$(reset_effective_db "$db")
+        echo -e "${YELLOW}Resetting database ${eff}...${NC}"
+        pg_drop_recreate "$eff" || return 1
+    done
+    # Metadata-owned named volumes (mlflow-data unless --keep-mlflow, uc-data).
+    local v vmode
+    for v in $(reset_discover_volumes); do
+        vmode=$(reset_volume_mode "$v")
+        case ",${vmode}," in *",metadata,"*) ;; *) continue ;; esac
+        [ "$keep_mlflow" = "true" ] && [ "$v" = "mlflow-data" ] && continue
+        docker volume rm "$(reset_effective_volume "$v")" >/dev/null 2>&1 || true
+    done
+    return 0
+}
+
+# Data plane: empty the object-store prefixes, clear the catalog/tracking ROWS that
+# referenced them (only when the owning DB is NOT being dropped — i.e. --data, not
+# --all, which drops those DBs wholesale), reset Kafka, and remove data volumes.
+reset_delete_data() {
+    local mode="$1"
+    local bucket
+    bucket=$(reset_effective_bucket)
+    echo -e "${YELLOW}Emptying s3://${bucket}/warehouse/ and mlflow-artifacts/...${NC}"
+    aws_s3 rm "s3://${bucket}/warehouse/" --recursive >/dev/null 2>&1 || true
+    aws_s3 rm "s3://${bucket}/mlflow-artifacts/" --recursive >/dev/null 2>&1 || true
+
+    if [ "$mode" = "data" ]; then
+        # DBs survive in --data, so clear the dangling rows explicitly (plan 1.14.1,
+        # 1.18.4) — otherwise --data would manufacture the orphans I-32 forbids.
+        reset_clear_uc_registrations || true
+        reset_clear_mlflow_runs || true
+        reset_clear_iceberg_rows || true
+    fi
+
+    # Data-plane named volumes (spark-data, spark-logs).
+    local v vmode
+    for v in $(reset_discover_volumes); do
+        vmode=$(reset_volume_mode "$v")
+        case ",${vmode}," in *",data,"*) ;; *) continue ;; esac
+        docker volume rm "$(reset_effective_volume "$v")" >/dev/null 2>&1 || true
+    done
+    return 0
+}
+
+# Clear UC table registrations via the REST API (UC stays UP in --data), keeping
+# catalogs and schemas. Best-effort; uses python3 for JSON.
+reset_clear_uc_registrations() {
+    local uc_url="http://localhost:$(resolve_port 8081)/api/2.1/unity-catalog"
+    python3 - "$uc_url" <<'PY' 2>/dev/null || true
+import json, sys, urllib.request
+base = sys.argv[1]
+def get(path):
+    try:
+        with urllib.request.urlopen(base + path, timeout=10) as r:
+            return json.load(r)
+    except Exception:
+        return {}
+def delete(path):
+    req = urllib.request.Request(base + path, method="DELETE")
+    try:
+        urllib.request.urlopen(req, timeout=10).read()
+    except Exception:
+        pass
+for cat in get("/catalogs").get("catalogs", []):
+    c = cat["name"]
+    for sch in get(f"/schemas?catalog_name={c}").get("schemas", []):
+        s = sch["name"]
+        for tbl in get(f"/tables?catalog_name={c}&schema_name={s}").get("tables", []):
+            delete(f"/tables/{c}.{s}.{tbl['name']}")
+PY
+    return 0
+}
+
+# Delete MLflow run records (mlflow is quiesced; act on its DB directly), keeping
+# experiments. Tolerant of MLflow-version schema differences.
+reset_clear_mlflow_runs() {
+    local db t
+    db=$(reset_effective_db mlflow)
+    for t in latest_metrics metrics params tags inputs input_tags runs; do
+        pg_psql -d "$db" -c "DELETE FROM ${t};" >/dev/null 2>&1 || true
+    done
+    return 0
+}
+
+# Delete Iceberg JDBC-catalog table rows, keeping the database/namespaces.
+reset_clear_iceberg_rows() {
+    local db
+    db=$(reset_effective_db iceberg_catalog)
+    pg_psql -d "$db" -c "DELETE FROM iceberg_tables;" >/dev/null 2>&1 || true
+    return 0
+}
+
+reset_do_deletions() {
+    local mode="$1" keep_mlflow="$2"
+    if [ "$mode" = "metadata" ] || [ "$mode" = "all" ]; then
+        reset_delete_metadata "$keep_mlflow" || return 1
+    fi
+    if [ "$mode" = "data" ] || [ "$mode" = "all" ]; then
+        reset_delete_data "$mode" || return 1
+    fi
+    return 0
+}
+
+# Orchestrate: semantic gate -> capture running set -> quiesce -> delete -> restore
+# ONLY on success; on failure leave services stopped + marker (plan 1.16.5).
 reset_execute() {
-    echo "reset: destructive execution lands in Checkpoint 3 of this PR (PR #0)." >&2
-    return 3
+    local mode="$1" keep_mlflow="$2"
+    reset_semantic_gate || return 1
+    rm -f "$(reset_marker_path)" 2>/dev/null || true
+
+    local running
+    running=$(reset_running_services)
+    reset_quiesce "$mode"
+
+    if ! reset_do_deletions "$mode" "$keep_mlflow"; then
+        reset_write_marker "$mode"
+        echo -e "${RED}Reset FAILED mid-operation.${NC} Services left stopped to avoid compounding corruption." >&2
+        echo -e "  Recovery: restore from a backup or re-run reset. Marker: $(reset_marker_path)" >&2
+        return 1
+    fi
+
+    reset_restore_services "$running"
+    echo -e "${GREEN}Reset complete (mode: ${mode}).${NC}"
+    return 0
 }
 
 # ./lakehouse reset --data|--metadata|--all [--keep-mlflow] [--dry-run] [--yes]
@@ -1522,8 +1871,17 @@ cmd_reset() {
         [ "$keep_mlflow" = true ] && label="$mode --keep-mlflow"
         echo "Reset plan (mode: ${label}) — DRY RUN, no changes will be made:"
         reset_emit_plan "$mode" "$keep_mlflow"
+        if [ "$mode" = "metadata" ]; then
+            echo ""
+            reset_metadata_warning "$keep_mlflow"
+        fi
         echo "No changes made (dry-run)."
         return 0
+    fi
+
+    # The classified-orphan warning is shown before a real --metadata reset too.
+    if [ "$mode" = "metadata" ]; then
+        reset_metadata_warning "$keep_mlflow"
     fi
 
     # Destructive path requires confirmation: --yes, or an interactive 'yes'.
