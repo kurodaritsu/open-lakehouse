@@ -14,6 +14,7 @@ touches nothing). No Docker required.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
 import tempfile
@@ -255,3 +256,120 @@ class TestU54ProductionResetUnrestricted:
         assert any("lakehouse" in n for n in s3)  # default S3_BUCKET
         dbs = {r["name"] for r in rows if r["target"] == "database"}
         assert "mlflow" in dbs and "airflow" in dbs
+
+
+# --- U-33 & U-56 (Checkpoint 3): --keep-mlflow semantics -------------------------
+
+
+class TestU33U56KeepMlflow:
+    def test_u33_keep_mlflow_excludes_mlflow_db_only(self):
+        dbs = {
+            r["name"]
+            for r in _plan("--metadata", "--keep-mlflow")
+            if r["target"] == "database"
+        }
+        assert "mlflow" not in dbs, "--keep-mlflow must exclude the mlflow DB"
+        assert {"airflow", "iceberg_catalog"} <= dbs
+
+    def test_u56_metadata_warns_unrecoverable_mlflow(self):
+        out = _run("reset", "--metadata", "--dry-run").stdout
+        assert "UNRECOVERABLE" in out and "MLflow artifacts" in out
+        # A byte-size figure accompanies the unrecoverable class.
+        assert re.search(r"mlflow-artifacts/ \(.+\)", out)
+
+    def test_u56_keep_mlflow_suppresses_unrecoverable_class(self):
+        out = _run("reset", "--metadata", "--keep-mlflow", "--dry-run").stdout
+        assert (
+            "UNRECOVERABLE" not in out
+        ), "--keep-mlflow preserves artifacts; they must not be labelled orphans"
+        # The other two classes remain.
+        assert "recoverable" in out and "doubtful" in out
+
+    def test_warning_never_names_sync_to_uc(self):
+        out = _run("reset", "--metadata", "--dry-run").stdout
+        assert "sync_to_uc" not in out  # absent in PR #0 (plan 1.14.6)
+
+
+# --- U-59: reset inventory excludes overlays -------------------------------------
+
+
+class TestU59InventoryExcludesOverlays:
+    def test_discover_skips_test_yml_and_overlay_dir(self):
+        # reset_discover_volumes globs docker-compose-*.yml at the repo root and
+        # skips *.test.yml; overlay files live under tests/overlays/ (a different
+        # path) so they are excluded by location too (plan 1.16.6).
+        body = _func_body("reset_discover_volumes")
+        assert "*.test.yml" in body
+        assert "docker-compose-*.yml" in body
+
+    def test_plan_contains_no_overlay_only_volume(self):
+        # ol-test-* / *.test.yml volumes must never appear in a production plan.
+        vols = {r["name"] for r in _plan("--all") if r["target"] == "volume"}
+        assert not any(v.startswith("ol-test-") for v in vols)
+        assert vols <= {"mlflow-data", "uc-data", "uc-logs", "spark-data", "spark-logs"}
+
+
+# --- U-66b: the semantic gate is wired into reset --------------------------------
+
+
+def _run_gate(env_extra: dict) -> int:
+    """Run reset_semantic_gate (extracted from lakehouse) under a given env."""
+    funcs = "".join(
+        _extract(name)
+        for name in (
+            "detect_uc_backend",
+            "reset_discover_volumes",
+            "reset_effective_bucket",
+            "reset_effective_db",
+            "reset_effective_volume",
+            "reset_semantic_gate",
+        )
+    )
+    script = (
+        f'PROJECT_ROOT="{REPO_ROOT}"; cd "$PROJECT_ROOT"; RED=""; NC="";\n'
+        f"source scripts/lib/overlay.sh\n{funcs}\nreset_semantic_gate\n"
+    )
+    env = {**os.environ, **env_extra}
+    return subprocess.run(
+        ["bash", "-c", script], env=env, capture_output=True, text=True, timeout=60
+    ).returncode
+
+
+def _extract(name: str) -> str:
+    m = re.search(rf"(^{re.escape(name)}\(\) \{{.*?^\}})", TEXT, re.M | re.S)
+    assert m, f"{name} not found"
+    return m.group(1) + "\n"
+
+
+class TestU66bGateWiredIntoReset:
+    RID = "gate0001"
+    GOOD = {
+        "OVERLAY_ACTIVE": "true",
+        "LAKEHOUSE_TEST_RUN_ID": RID,
+        "LAKEHOUSE_RESOURCE_SUFFIX": RID,
+        "COMPOSE_PROJECT_NAME": f"ol-test-{RID}",
+    }
+
+    def test_reset_execute_calls_gate_before_deletions(self):
+        body = _func_body("reset_execute")
+        assert body.index("reset_semantic_gate") < body.index(
+            "reset_do_deletions"
+        ), "the semantic gate must run before any deletion"
+
+    def test_good_targets_pass(self):
+        assert _run_gate(self.GOOD) == 0
+
+    def test_overlay_inactive_is_unrestricted(self):
+        assert _run_gate({"OVERLAY_ACTIVE": "false"}) == 0
+
+    def test_bad_bucket_class_aborts(self):
+        assert _run_gate({**self.GOOD, "S3_BUCKET": "lakehouse"}) != 0
+
+    def test_bad_database_class_aborts(self):
+        assert _run_gate({**self.GOOD, "MLFLOW_PG_DB": "mlflow"}) != 0
+
+    def test_bad_volume_class_aborts(self):
+        assert _run_gate({**self.GOOD, "COMPOSE_PROJECT_NAME": "ol-test-other999"}) != 0
+
+    def test_bad_container_class_aborts(self):
+        assert _run_gate({**self.GOOD, "LAKEHOUSE_RESOURCE_SUFFIX": "other999"}) != 0
