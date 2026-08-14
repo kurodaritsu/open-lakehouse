@@ -28,6 +28,29 @@ cat demos/<name>/README.md
 # 5. run Teardown commands (or bash demos/<name>/teardown.sh)
 ```
 
+## Reset / backup / restore around a demo
+
+The teardown in a demo's `teardown.sh` removes only what that demo created (its S3
+prefix, its tables/topics). To wipe the **whole** environment between demos, or to
+protect state you care about, use the lifecycle commands rather than `docker compose
+down -v` (which cannot reset host PostgreSQL or SeaweedFS — see [stop.md](stop.md)):
+
+```bash
+# Snapshot everything first if the state matters (pg_dump per DB + S3 + volumes + UC H2).
+./lakehouse backup                         # prints the artifact path + a restore command
+./lakehouse restore --from <path>          # fail-stop and recoverable
+
+# Start fresh (confirms; add --yes to skip the prompt, --dry-run to preview).
+./lakehouse reset --all                    # databases + object store
+./lakehouse reset --data                   # object store + dangling catalog/tracking rows only
+./lakehouse reset --metadata --keep-mlflow # reset catalogs but preserve MLflow
+
+# Confirm the result is consistent (four orphan classes; also flags interrupted resets).
+./lakehouse doctor
+```
+
+Rule of thumb: **demo teardown = its own artifacts; `reset` = the whole world.**
+
 ## Discovery
 
 ```bash

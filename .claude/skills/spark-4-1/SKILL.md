@@ -87,7 +87,7 @@ The vast majority of DataFrame/SQL operations work identically over Connect. Kno
 - **Some `SparkContext`-level APIs** aren't accessible (`spark.sparkContext.broadcast`, manual accumulators, low-level RDD ops). Use DataFrame equivalents.
 - **`mapInPandas` / Arrow UDFs** work, but heavy pickling has more round-trip cost over gRPC than in-JVM.
 - **Custom JVM-side code** (Scala UDAFs, Hadoop input formats) can't be registered from the Connect client — load them server-side via `spark-defaults.conf` `spark.jars` or pre-install in the cluster image.
-- **Structured Streaming** works including watermarks, `foreachBatch`, and Iceberg sink. See [[kafka-streaming]] for the realtime demo pattern.
+- **Structured Streaming** works including watermarks, `foreachBatch`, and a Delta sink into Unity Catalog (`unity.<schema>.<table>`). The `iceberg.` REST catalog is **read-only** on this stack, so it is not a streaming write target. See [[kafka-streaming]] for the realtime demo pattern.
 
 ## Common patterns
 
@@ -102,13 +102,15 @@ from pyspark.sql.window import Window
 w = Window.partitionBy("order_id").orderBy(f.col("event_ts").desc())
 deduped = df.withColumn("_rn", f.row_number().over(w)).where("_rn = 1").drop("_rn")
 
-# Iceberg write (UC-resolved namespace)
-deduped.writeTo("iceberg.silver.orders").using("iceberg").createOrReplace()
+# Write to Unity Catalog as DELTA — the primary write path on this stack.
+# The `iceberg.` catalog is READ-ONLY (UC OSS 0.4.x exposes no Iceberg write
+# endpoints — CLAUDE.md Golden Rule #1); read Iceberg via `iceberg.<schema>.<t>`.
+deduped.writeTo("unity.silver.orders").using("delta").createOrReplace()
 
-# Iceberg merge (upsert)
+# Delta merge (upsert)
 deduped.createOrReplaceTempView("staging")
 spark.sql("""
-  MERGE INTO iceberg.silver.orders AS t
+  MERGE INTO unity.silver.orders AS t
   USING staging AS s
   ON t.order_id = s.order_id
   WHEN MATCHED THEN UPDATE SET *

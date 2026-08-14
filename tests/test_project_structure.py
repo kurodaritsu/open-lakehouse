@@ -4,6 +4,7 @@ Verifies the expected directory layout for the open-lakehouse demo platform.
 """
 
 import os
+import re
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -143,6 +144,21 @@ class TestDemoTeardowns:
                 if "s3 rm" in s or (s.endswith("--recursive \\")):
                     # the rm stanza spans lines; assert the block contains `|| true`
                     assert "|| true" in body, f"{f}: s3 rm must be idempotent (|| true)"
+
+
+class TestU49PytestMarkers:
+    """U-49 (Checkpoint 6): every marker PR #0 uses is registered in pyproject.toml
+    (they were absent on `main`, which makes --strict-markers error)."""
+
+    def test_required_markers_registered(self):
+        cfg = (PROJECT_ROOT / "pyproject.toml").read_text()
+        # Grab the [tool.pytest.ini_options] markers array.
+        m = re.search(r"markers\s*=\s*\[(.*?)\]", cfg, re.S)
+        assert m, "no pytest markers array in pyproject.toml"
+        block = m.group(1)
+        registered = set(re.findall(r'"([a-z_]+):', block))
+        for marker in ("merge", "storage", "network", "dashboard", "sharing"):
+            assert marker in registered, f"pytest marker '{marker}' not registered"
 
 
 class TestAIScaffolding:

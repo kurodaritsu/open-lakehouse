@@ -31,7 +31,7 @@ You are operating the open-lakehouse demo platform. Everything you need to spin 
 
 4. **`--spark-local` is a stub.** It exists on the CLI for forward-compat but exits with "not yet implemented" today. The placeholder demo lives at `demos/local-mode-spark/README.md`. Don't try to make local mode work by hand-patching — when it lands, it'll be its own clean implementation.
 
-5. **Never `docker compose down -v` without confirming.** The `-v` flag wipes named volumes (PostgreSQL → loses Unity Catalog state; SeaweedFS → loses all object data). Plain `down` is safe and is what `lakehouse stop` uses.
+5. **Never destroy state with raw `docker compose down -v`.** It wipes only Compose-managed volumes — it does **not** reset host PostgreSQL or SeaweedFS, so it leaves a half-wiped, inconsistent stack. To start fresh use `./lakehouse reset` — it confirms, dry-runs, and actually resets the databases and object store. Plain `./lakehouse stop` (no `-v`) is the safe default.
 
 6. **Always preflight before start.** Run `./lakehouse preflight` (or `scripts/preflight.sh`) before `./lakehouse start all`. A failing preflight tells you what's wrong before Docker spends 90s composing services that will then fail to connect.
 
