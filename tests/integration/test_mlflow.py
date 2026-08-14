@@ -16,6 +16,7 @@ FAIL-CLOSED on tooling: skips when Docker is unavailable.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -25,6 +26,24 @@ REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 LAKEHOUSE = REPO_ROOT / "lakehouse"
 
 pytestmark = [pytest.mark.integration, pytest.mark.merge]
+
+# Overlay-activation vars. This is a DEFAULT-PATH test, so they must be scrubbed from
+# any CLI invocation — otherwise, when the suite is driven with LAKEHOUSE_TEST_RUN_ID
+# exported for the run-scoped tests, `./lakehouse` sees a PARTIAL overlay activation
+# and (correctly) aborts all-or-nothing before it can report status.
+_OVERLAY_VARS = (
+    "LAKEHOUSE_TEST_RUN_ID",
+    "LAKEHOUSE_OVERLAY_DIR",
+    "LAKEHOUSE_RESOURCE_SUFFIX",
+    "LAKEHOUSE_ENV_FILE",
+    "LAKEHOUSE_PORT_OFFSET",
+    "COMPOSE_PROJECT_NAME",
+)
+
+
+def _default_path_env() -> dict:
+    return {k: v for k, v in os.environ.items() if k not in _OVERLAY_VARS}
+
 
 ALPINE = "alpine:latest"
 STANDIN = "mlflow-server"
@@ -57,6 +76,7 @@ def _status_json() -> dict:
         capture_output=True,
         text=True,
         timeout=60,
+        env=_default_path_env(),
     )
     assert r.returncode == 0, r.stderr
     return json.loads(r.stdout)

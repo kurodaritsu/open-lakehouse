@@ -17,6 +17,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -50,12 +51,25 @@ def _aws(*args: str, stdin: str | None = None) -> subprocess.CompletedProcess:
 
 
 def _put(bucket: str, key: str) -> None:
-    _aws("cp", "-", f"s3://{bucket}/{key}", stdin="x")
+    r = _aws("cp", "-", f"s3://{bucket}/{key}", stdin="x")
+    assert r.returncode == 0, f"seeding {key} failed: {r.stderr}"
 
 
 def _count(bucket: str, prefix: str) -> int:
     r = _aws("ls", f"s3://{bucket}/{prefix}", "--recursive")
     return len([ln for ln in r.stdout.splitlines() if ln.strip()])
+
+
+def _count_stable(bucket: str, prefix: str, want: int, tries: int = 10) -> int:
+    # SeaweedFS S3 LIST is only eventually consistent under load; poll briefly so the
+    # test asserts on settled state rather than a mid-write listing.
+    n = _count(bucket, prefix)
+    for _ in range(tries):
+        if n == want:
+            return n
+        time.sleep(0.5)
+        n = _count(bucket, prefix)
+    return n
 
 
 @pytest.fixture()
@@ -89,8 +103,8 @@ def test_i35_template_teardown_cleans_its_prefix(bucket, tmp_path):
     _put(bucket, f"{prefix}part-0.parquet")
     _put(bucket, f"{prefix}sub/part-1.parquet")
     _put(bucket, "warehouse/other/keep.parquet")
-    assert _count(bucket, prefix) == 2
-    assert _count(bucket, "warehouse/other/") == 1
+    assert _count_stable(bucket, prefix, 2) == 2
+    assert _count_stable(bucket, "warehouse/other/", 1) == 1
 
     # Run the template's teardown, pointing it at the run-scoped bucket + prefix.
     r = subprocess.run(
@@ -111,8 +125,10 @@ def test_i35_template_teardown_cleans_its_prefix(bucket, tmp_path):
     assert r.returncode == 0, f"teardown must succeed: {r.stderr}"
 
     # Zero residue under the demo's prefix; the unrelated object is untouched.
-    assert _count(bucket, prefix) == 0, "teardown must remove its S3 prefix entirely"
-    assert _count(bucket, "warehouse/other/") == 1, "teardown must not touch other data"
+    assert _count_stable(bucket, prefix, 0) == 0, "teardown must remove its S3 prefix"
+    assert (
+        _count_stable(bucket, "warehouse/other/", 1) == 1
+    ), "teardown must not touch other data"
 
     # Idempotent: a second run over the now-clean prefix still succeeds.
     r2 = subprocess.run(
