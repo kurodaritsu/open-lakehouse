@@ -433,22 +433,38 @@ def test_i50_destructive_modes_quiesce(env):
     assert "Quiescing" in r.stdout or "Quiescing" in r.stderr
 
 
-def test_failed_reset_writes_marker_and_leaves_stopped(env, tmp_path):
-    # A destructive reset that fails mid-operation must NOT restore services; it
-    # leaves a marker with recovery instructions (plan 1.16.5). Inject a failure
-    # via an unreachable PostgreSQL port in the effective env.
+# I-52b: a FAILED destructive reset, in EVERY mode, leaves services STOPPED with a
+# marker, and `doctor` then reports the interrupted reset (plan 1.16.5). Injection is
+# per-mode: --data fails on the object-store step (unreachable S3), while --metadata
+# and --all fail on the DROP DATABASE step (unreachable PostgreSQL). Both are genuine
+# mid-operation failures — restarting writers against half-deleted state must not
+# happen.
+@pytest.mark.parametrize(
+    "mode,inject",
+    [("--data", "s3"), ("--metadata", "pg"), ("--all", "pg")],
+)
+def test_i52b_failed_reset_stays_stopped_and_doctor_reports(
+    env, mode, inject, tmp_path
+):
     _seed(env)
     marker = REPO_ROOT / ".lakehouse-reset-interrupted"
     marker.unlink(missing_ok=True)
-    bad_env = tmp_path / "unreachable.env"
-    bad_env.write_text(
-        Path(env["overlay"]["LAKEHOUSE_ENV_FILE"])
-        .read_text()
-        .replace(f"POSTGRES_PORT={PG_PORT}", "POSTGRES_PORT=5599")
-    )
+    src = Path(env["overlay"]["LAKEHOUSE_ENV_FILE"]).read_text()
+    bad_env = tmp_path / f"bad-{inject}.env"
+    if inject == "pg":
+        bad_env.write_text(
+            src.replace(f"POSTGRES_PORT={PG_PORT}", "POSTGRES_PORT=5599")
+        )
+    else:
+        bad_env.write_text(
+            src.replace(
+                "S3_ENDPOINT=http://host.docker.internal:8333",
+                "S3_ENDPOINT=http://host.docker.internal:9999",
+            )
+        )
     bad_overlay = {**env["overlay"], "LAKEHOUSE_ENV_FILE": str(bad_env)}
     r = subprocess.run(
-        [str(LAKEHOUSE), "reset", "--metadata", "--yes"],
+        [str(LAKEHOUSE), "reset", mode, "--yes"],
         cwd=REPO_ROOT,
         env=bad_overlay,
         capture_output=True,
@@ -456,10 +472,21 @@ def test_failed_reset_writes_marker_and_leaves_stopped(env, tmp_path):
         timeout=120,
     )
     try:
-        assert r.returncode != 0, "a failed reset must exit non-zero"
+        assert r.returncode != 0, f"a failed {mode} reset must exit non-zero"
         assert "left stopped" in (r.stdout + r.stderr).lower()
         assert marker.exists(), "an interrupted-reset marker must be written"
         assert "interrupted-reset" in marker.read_text()
+        # doctor reports the interrupted reset (reads the marker; S3/PG state
+        # irrelevant to that line).
+        d = subprocess.run(
+            [str(LAKEHOUSE), "doctor"],
+            cwd=REPO_ROOT,
+            env=bad_overlay,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        assert "interrupted reset" in (d.stdout + d.stderr).lower()
     finally:
         marker.unlink(missing_ok=True)
 

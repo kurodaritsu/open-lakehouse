@@ -1738,12 +1738,18 @@ reset_delete_data() {
     local bucket
     bucket=$(reset_effective_bucket)
     echo -e "${YELLOW}Emptying s3://${bucket}/warehouse/ and mlflow-artifacts/...${NC}"
-    aws_s3 rm "s3://${bucket}/warehouse/" --recursive >/dev/null 2>&1 || true
-    aws_s3 rm "s3://${bucket}/mlflow-artifacts/" --recursive >/dev/null 2>&1 || true
+    # Fail-stop on a genuine S3 error (unreachable endpoint / missing bucket): a reset
+    # that deleted nothing must not report success (plan 1.15.3, I-52b). An
+    # already-empty or absent prefix still returns 0, so this never misfires on a
+    # clean slate.
+    aws_s3 rm "s3://${bucket}/warehouse/" --recursive >/dev/null || return 1
+    aws_s3 rm "s3://${bucket}/mlflow-artifacts/" --recursive >/dev/null || return 1
 
     if [ "$mode" = "data" ]; then
-        # DBs survive in --data, so clear the dangling rows explicitly (plan 1.14.1,
-        # 1.18.4) — otherwise --data would manufacture the orphans I-32 forbids.
+        # DBs survive in --data, so clear the dangling rows (plan 1.14.1, 1.18.4) —
+        # otherwise --data would manufacture the orphans I-32 forbids. Best-effort:
+        # these rows are advisory (doctor also reports them) and their cleanup must
+        # not block the object-store reset that already succeeded above.
         reset_clear_uc_registrations || true
         reset_clear_mlflow_runs || true
         reset_clear_iceberg_rows || true
@@ -2330,10 +2336,218 @@ cmd_restore() {
     return 0
 }
 
-# doctor — registered now (U-28); body lands in Checkpoint 5 of this PR.
+# --- doctor: orphan / inconsistency detector (Checkpoint 5, T-1.5.6) --------------
+#
+# doctor is READ-ONLY. It gathers a normalized inventory from S3 + Unity Catalog +
+# the MLflow database, then a PURE classifier (doctor_classify) maps it to FOUR
+# orphan classes (plan 1.19.1) — never a single aggregate count:
+#   recoverable-delta       Delta prefix with objects but no UC registration
+#   doubtful-iceberg        Iceberg prefix with no UC registration (UC OSS 0.4.x has
+#                           no Iceberg write endpoints, so re-registration may fail)
+#   unrecoverable-mlflow    mlflow-artifacts/ bytes whose run record is gone
+#   dangling-catalog-entry  UC row with empty/null location OR a valid URI resolving
+#                           to zero objects (plan 1.16.8)
+# The INVERSE MLflow direction (run record -> missing bytes) is undecidable without a
+# durable artifact manifest and is OMITTED (plan 1.19.1); a healthy artifact-free run
+# is therefore never flagged (U-62).
+
+# Pure classifier. Reads normalized inventory lines on stdin, emits one
+# "DOCTOR class=<c> name=<n>" per orphan. Distinct, Docker-free code path (U-34).
+# Line grammar (space-separated key=val, name= MUST be last so a value may contain
+# anything except a literal " name="):
+#   prefix   type=<delta|iceberg> registered=<yes|no> name=<loc>
+#   artifact run_known=<yes|no> name=<key>
+#   uc-row   objects=<N|NA> location_empty=<yes|no> name=<full>
+doctor_classify() {
+    local line kind
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        kind="${line%% *}"
+        case "$kind" in
+            prefix)
+                case "$line" in
+                    *"registered=yes"*) : ;;  # registered -> healthy, not an orphan
+                    *"type=delta"*)   echo "DOCTOR class=recoverable-delta name=${line#*name=}" ;;
+                    *"type=iceberg"*) echo "DOCTOR class=doubtful-iceberg name=${line#*name=}" ;;
+                esac
+                ;;
+            artifact)
+                case "$line" in
+                    *"run_known=no"*) echo "DOCTOR class=unrecoverable-mlflow name=${line#*name=}" ;;
+                esac
+                ;;
+            uc-row)
+                case "$line" in
+                    *"location_empty=yes"*)   echo "DOCTOR class=dangling-catalog-entry name=${line#*name=}" ;;
+                    *"objects=0 "*)           echo "DOCTOR class=dangling-catalog-entry name=${line#*name=}" ;;
+                esac
+                ;;
+        esac
+    done
+    return 0
+}
+
+# All UC table rows as TSV "<catalog.schema.table>\t<storage_location>". Reached via
+# the resolved UC container's netns (same transport as reset_clear_uc_registrations)
+# so it targets the run-scoped UC under an overlay and production UC otherwise. Empty
+# when UC is not running.
+doctor_uc_rows() {
+    local uc img
+    uc=$(resolve_container_name unity-catalog)
+    is_container_running "$uc" || return 0
+    img="${LAKEHOUSE_HTTP_IMAGE:-python:3-alpine}"
+    docker run -i --rm --network "container:${uc}" --entrypoint python3 "$img" - <<'PY' 2>/dev/null || true
+import json, urllib.request
+api = "http://localhost:8080/api/2.1/unity-catalog"
+def get(path):
+    try:
+        with urllib.request.urlopen(api + path, timeout=10) as x:
+            return json.load(x)
+    except Exception:
+        return {}
+for cat in get("/catalogs").get("catalogs", []):
+    c = cat["name"]
+    for sch in get(f"/schemas?catalog_name={c}").get("schemas", []):
+        s = sch["name"]
+        for t in get(f"/tables?catalog_name={c}&schema_name={s}").get("tables", []):
+            loc = (t.get("storage_location") or "").rstrip("/")
+            print(f"{c}.{s}.{t['name']}\t{loc}")
+PY
+}
+
+# Normalized S3 warehouse inventory: one "prefix" line per Delta/Iceberg table prefix
+# under warehouse/, tagged registered=yes|no by cross-referencing UC's storage
+# locations. A Delta prefix contains _delta_log/; an Iceberg prefix contains
+# metadata/*.metadata.json.
+doctor_inventory_s3_warehouse() {
+    local bucket reg keys
+    bucket=$(reset_effective_bucket)
+    reg="$(doctor_uc_rows | cut -f2 | grep -v '^$' || true)"
+    keys="$(aws_s3 ls "s3://${bucket}/warehouse/" --recursive 2>/dev/null | awk '{print $4}' || true)"
+
+    printf '%s\n' "$keys" | grep '/_delta_log/' 2>/dev/null \
+        | sed -E 's#/_delta_log/.*$##' | sort -u | while read -r p; do
+        [ -n "$p" ] || continue
+        loc="s3://${bucket}/${p}"
+        if printf '%s\n' "$reg" | grep -qxF "$loc"; then
+            echo "prefix type=delta registered=yes name=${loc}"
+        else
+            echo "prefix type=delta registered=no name=${loc}"
+        fi
+    done
+
+    printf '%s\n' "$keys" | grep -E '/metadata/[^/]*\.metadata\.json$' 2>/dev/null \
+        | sed -E 's#/metadata/[^/]*$##' | sort -u | while read -r p; do
+        [ -n "$p" ] || continue
+        loc="s3://${bucket}/${p}"
+        if printf '%s\n' "$reg" | grep -qxF "$loc"; then
+            echo "prefix type=iceberg registered=yes name=${loc}"
+        else
+            echo "prefix type=iceberg registered=no name=${loc}"
+        fi
+    done
+    return 0
+}
+
+# Normalized MLflow inventory: one "artifact" line per per-run artifact object, tagged
+# run_known=yes|no by cross-referencing the run id (the 32-hex path segment) against
+# the mlflow runs table. Keys without a run-id segment are ambiguous and skipped (no
+# false positives). Skipped entirely when the runs table is absent (MLflow not set
+# up -> nothing decidable, plan 1.19.1).
+doctor_inventory_mlflow() {
+    local bucket db known keys run
+    bucket=$(reset_effective_bucket)
+    db=$(reset_effective_db mlflow)
+    if [ -z "$(pg_psql -d "$db" -tAc "SELECT to_regclass('runs')" 2>/dev/null | tr -d '[:space:]')" ]; then
+        return 0
+    fi
+    known="$(pg_psql -d "$db" -tAc 'SELECT run_uuid FROM runs' 2>/dev/null | tr -d '\r' || true)"
+    keys="$(aws_s3 ls "s3://${bucket}/mlflow-artifacts/" --recursive 2>/dev/null | awk '{print $4}' || true)"
+    printf '%s\n' "$keys" | while read -r k; do
+        [ -n "$k" ] || continue
+        run="$(printf '%s\n' "$k" | tr '/' '\n' | grep -iE '^[0-9a-f]{32}$' | head -1)"
+        [ -n "$run" ] || continue
+        if printf '%s\n' "$known" | grep -qxF "$run"; then
+            echo "artifact run_known=yes name=s3://${bucket}/${k}"
+        else
+            echo "artifact run_known=no name=s3://${bucket}/${k}"
+        fi
+    done
+    return 0
+}
+
+# Normalized UC inventory: one "uc-row" line per registered table, tagging the
+# dangling inputs — empty/null storage_location, or a valid URI whose prefix has zero
+# objects (plan 1.16.8).
+doctor_inventory_uc() {
+    local name loc n
+    while IFS=$'\t' read -r name loc; do
+        [ -n "$name" ] || continue
+        if [ -z "$loc" ]; then
+            echo "uc-row objects=NA location_empty=yes name=${name}"
+            continue
+        fi
+        n="$(aws_s3 ls "${loc}/" --recursive 2>/dev/null | grep -c . || true)"
+        echo "uc-row objects=${n:-0} location_empty=no name=${name}"
+    done < <(doctor_uc_rows)
+    return 0
+}
+
+doctor_gather_inventory() {
+    doctor_inventory_s3_warehouse
+    doctor_inventory_mlflow
+    doctor_inventory_uc
+    return 0
+}
+
+# Print one class section (skipped when empty). Never a single aggregate count
+# (T-1.5.6): each class is reported separately with its own items.
+doctor_report_class() {
+    local findings="$1" cls="$2" desc="$3" items n
+    items="$(printf '%s\n' "$findings" | grep "class=${cls} " | sed "s/^DOCTOR class=${cls} name=/  - /" || true)"
+    n=$(printf '%s\n' "$items" | grep -c '^  - ' || true)
+    [ "$n" -eq 0 ] && return 0
+    echo -e "${YELLOW}[${cls}]${NC} ${desc} — ${n}:"
+    printf '%s\n' "$items"
+    return 0
+}
+
+# ./lakehouse doctor — report orphaned data / catalog inconsistencies + any
+# interrupted reset/restore markers. Read-only; exits 0 (advisory).
 cmd_doctor() {
-    echo "doctor: implemented in Checkpoint 5 of this PR (PR #0)." >&2
-    return 3
+    header "DOCTOR"
+    local had=false
+
+    if [ -f "$(reset_marker_path)" ]; then
+        had=true
+        echo -e "${RED}! interrupted reset detected${NC} — a destructive reset did not complete:"
+        sed 's/^/    /' "$(reset_marker_path)"
+        echo ""
+    fi
+    if [ -f "$(restore_marker_path)" ]; then
+        had=true
+        echo -e "${RED}! interrupted restore detected${NC} — a restore did not complete:"
+        sed 's/^/    /' "$(restore_marker_path)"
+        echo ""
+    fi
+
+    local findings
+    findings="$(doctor_gather_inventory | doctor_classify)"
+    if [ -n "$findings" ]; then had=true; fi
+
+    doctor_report_class "$findings" recoverable-delta \
+        "recoverable Delta prefixes (objects present, no UC registration — re-registerable from the Delta log)"
+    doctor_report_class "$findings" doubtful-iceberg \
+        "doubtful Iceberg prefixes (UC OSS 0.4.x exposes no Iceberg write endpoints — re-registration may be impossible)"
+    doctor_report_class "$findings" unrecoverable-mlflow \
+        "UNRECOVERABLE MLflow artifacts (bytes whose run record is gone)"
+    doctor_report_class "$findings" dangling-catalog-entry \
+        "dangling catalog entries (UC row with empty location or a URI resolving to zero objects)"
+
+    if [ "$had" = false ]; then
+        echo -e "${GREEN}No orphans or inconsistencies detected.${NC}"
+    fi
+    return 0
 }
 
 # Help

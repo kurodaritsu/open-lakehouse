@@ -115,6 +115,36 @@ class TestConnectFirst:
         assert "NOT YET IMPLEMENTED" in content, "Placeholder must flag deferred state"
 
 
+class TestDemoTeardowns:
+    """U-32 (Checkpoint 5): teardown template covers S3 prefixes; every demo
+    teardown is `set -euo pipefail` and idempotent-safe."""
+
+    def _teardowns(self):
+        return sorted((PROJECT_ROOT / "demos").glob("*/teardown.sh"))
+
+    def test_template_has_s3_prefix_cleanup(self):
+        body = (PROJECT_ROOT / "demos/_template/teardown.sh").read_text()
+        assert "s3 rm" in body, "template teardown must delete its S3 prefix"
+        assert "--recursive" in body
+        assert "DEMO_S3_PREFIX" in body, "template must parameterize the S3 prefix"
+
+    def test_every_teardown_is_strict_and_idempotent(self):
+        teardowns = self._teardowns()
+        assert teardowns, "expected demo teardown scripts"
+        for f in teardowns:
+            body = f.read_text()
+            assert "set -euo pipefail" in body, f"{f} must be set -euo pipefail"
+            # Destructive lines are guarded so a re-run over already-clean state is
+            # not an error (idempotent): every active `s3 rm` carries `|| true`.
+            for line in body.splitlines():
+                s = line.strip()
+                if s.startswith("#"):
+                    continue
+                if "s3 rm" in s or (s.endswith("--recursive \\")):
+                    # the rm stanza spans lines; assert the block contains `|| true`
+                    assert "|| true" in body, f"{f}: s3 rm must be idempotent (|| true)"
+
+
 class TestAIScaffolding:
     def test_claude_md_under_cap(self):
         content = (PROJECT_ROOT / "CLAUDE.md").read_text()

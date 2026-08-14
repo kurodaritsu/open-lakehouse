@@ -10,6 +10,8 @@
     U-31  backup/restore argument contract (Checkpoint 4)
     U-48  backup covers PostgreSQL — pg_dump per DB + S3 sync, not volume-only (CP4)
     U-63  backup prints a ready-to-paste `restore --from` command (CP4)
+    U-34  orphan classifier is a distinct code path — FOUR classes (Checkpoint 5)
+    U-62  artifact-free MLflow runs are never flagged (Checkpoint 5)
 
 All unit-level: static scans of `lakehouse` + running `reset --dry-run` (which
 touches nothing). No Docker required.
@@ -454,3 +456,114 @@ class TestU63BackupPrintsRestoreCommand:
         body = _func_body("cmd_restore")
         assert "--from" in body
         assert "--from <path> is required" in body
+
+
+# --- U-34 & U-62 (Checkpoint 5): the orphan classifier ---------------------------
+
+
+def _classify(inventory: str) -> list[dict]:
+    """Feed normalized inventory lines to doctor_classify (extracted from lakehouse)
+    and parse the emitted DOCTOR tokens. No Docker: a pure code path (U-34)."""
+    body = re.search(
+        r"(^doctor_classify\(\) \{.*?^\})", TEXT, re.M | re.S
+    ).group(1)
+    script = f"{body}\ndoctor_classify"
+    r = subprocess.run(
+        ["bash", "-c", script],
+        input=inventory,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert r.returncode == 0, r.stderr
+    rows = []
+    for line in r.stdout.splitlines():
+        if line.startswith("DOCTOR "):
+            # name= is last and may contain '='; split only the class token.
+            parts = line[len("DOCTOR ") :]
+            cls = parts.split(" ", 1)[0].split("=", 1)[1]
+            name = parts.split("name=", 1)[1] if "name=" in parts else ""
+            rows.append({"class": cls, "name": name})
+    return rows
+
+
+class TestU34OrphanClassifier:
+    def _classes(self, rows):
+        return {r["class"] for r in rows}
+
+    def test_delta_prefix_unregistered_is_recoverable(self):
+        rows = _classify(
+            "prefix type=delta registered=no name=s3://b/warehouse/d1\n"
+        )
+        assert rows == [
+            {"class": "recoverable-delta", "name": "s3://b/warehouse/d1"}
+        ]
+
+    def test_iceberg_prefix_unregistered_is_doubtful(self):
+        rows = _classify(
+            "prefix type=iceberg registered=no name=s3://b/warehouse/i1\n"
+        )
+        assert self._classes(rows) == {"doubtful-iceberg"}
+
+    def test_registered_prefix_is_not_flagged(self):
+        rows = _classify(
+            "prefix type=delta registered=yes name=s3://b/warehouse/d1\n"
+            "prefix type=iceberg registered=yes name=s3://b/warehouse/i1\n"
+        )
+        assert rows == []
+
+    def test_mlflow_artifact_without_run_is_unrecoverable(self):
+        rows = _classify(
+            "artifact run_known=no name=s3://b/mlflow-artifacts/1/deadbeef/artifacts/f\n"
+        )
+        assert self._classes(rows) == {"unrecoverable-mlflow"}
+
+    def test_uc_row_empty_location_is_dangling(self):
+        rows = _classify("uc-row objects=NA location_empty=yes name=cat.s.t\n")
+        assert self._classes(rows) == {"dangling-catalog-entry"}
+
+    def test_uc_row_zero_objects_is_dangling(self):
+        rows = _classify("uc-row objects=0 location_empty=no name=cat.s.t\n")
+        assert self._classes(rows) == {"dangling-catalog-entry"}
+
+    def test_uc_row_with_objects_is_not_flagged(self):
+        rows = _classify("uc-row objects=5 location_empty=no name=cat.s.t\n")
+        assert rows == []
+
+    def test_all_four_classes_are_distinct_paths(self):
+        rows = _classify(
+            "prefix type=delta registered=no name=s3://b/warehouse/d1\n"
+            "prefix type=iceberg registered=no name=s3://b/warehouse/i1\n"
+            "artifact run_known=no name=s3://b/mlflow-artifacts/1/dead/artifacts/f\n"
+            "uc-row objects=0 location_empty=no name=cat.s.t\n"
+        )
+        assert self._classes(rows) == {
+            "recoverable-delta",
+            "doubtful-iceberg",
+            "unrecoverable-mlflow",
+            "dangling-catalog-entry",
+        }
+
+    def test_no_fifth_class_exists(self):
+        # There is no class keyed on a run record whose bytes are gone (undecidable,
+        # plan 1.19.1). The classifier must never emit anything but the four.
+        body = _func_body("doctor_classify")
+        emitted = set(re.findall(r"class=([a-z-]+) ", body))
+        assert emitted == {
+            "recoverable-delta",
+            "doubtful-iceberg",
+            "unrecoverable-mlflow",
+            "dangling-catalog-entry",
+        }
+
+
+class TestU62ArtifactFreeRunsUnflagged:
+    def test_healthy_run_with_no_artifact_is_never_flagged(self):
+        # A healthy artifact-free run produces NO artifact inventory line at all
+        # (nothing under mlflow-artifacts/ for it) and no other class references it,
+        # so the classifier emits nothing. Guards against reintroducing the removed
+        # fifth "suspected missing artifacts" class.
+        rows = _classify(
+            "artifact run_known=yes name=s3://b/mlflow-artifacts/1/live/artifacts/f\n"
+        )
+        assert rows == []
