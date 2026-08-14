@@ -1933,16 +1933,398 @@ cmd_reset() {
     reset_execute "$mode" "$keep_mlflow"
 }
 
-# backup / restore / doctor — registered now (U-28) so the command surface is
-# complete; bodies land in later checkpoints of this PR.
+# --- backup / restore engine (Checkpoint 4, T-1.5.5 / T-1.5.5b / T-1.5.5c) --------
+#
+# backup and restore share ONE snapshot code path (backup_take_snapshot) and ONE
+# quiesce model (backup_quiesce_writers/backup_unquiesce_writers). The snapshot path
+# NEVER restarts services, so restore can take its pre-restore snapshot inside the
+# same quiesced window it later mutates in (plan 1.16.9). Quiescing uses `docker stop`
+# (container-preserving), NOT `docker compose down`, so a stopped UC container's H2
+# file survives for `docker cp` (plan 1.15.1) and restarts are cheap `docker start`s.
+
+# The app containers that WRITE to PostgreSQL / S3 / UC. The storage substrate itself
+# (host PostgreSQL + SeaweedFS) is intentionally excluded — it must stay up to be
+# dumped/synced. One resolved (overlay-aware) name per line.
+backup_writer_containers() {
+    local c
+    for c in spark-master-41 spark-worker-41 spark-connect-41 kafka zookeeper \
+             unity-catalog mlflow airflow-webserver airflow-scheduler airflow-triggerer; do
+        resolve_container_name "$c"
+    done
+}
+
+# Stop every currently-running writer, recording it in QUIESCED_WRITERS for restart.
+# (`while read` under process substitution runs in THIS shell, so the array persists.)
+backup_quiesce_writers() {
+    QUIESCED_WRITERS=()
+    local c
+    while read -r c; do
+        if is_container_running "$c"; then
+            QUIESCED_WRITERS+=("$c")
+            echo -e "${YELLOW}Quiescing ${c}...${NC}"
+            docker stop "$c" >/dev/null 2>&1 || true
+        fi
+    done < <(backup_writer_containers)
+    return 0
+}
+
+# Restart the writers recorded by backup_quiesce_writers (docker start — layers intact).
+backup_unquiesce_writers() {
+    local c
+    for c in "${QUIESCED_WRITERS[@]}"; do
+        echo -e "${YELLOW}Restarting ${c}...${NC}"
+        docker start "$c" >/dev/null 2>&1 || echo -e "  ${YELLOW}!${NC} ${c} did not restart cleanly; check ./lakehouse status" >&2
+    done
+    return 0
+}
+
+# pg_dump a single database to <dir>/<db>.dump — custom format WITH --create, so the
+# archive carries CREATE DATABASE ... OWNER and object GRANTs (I-29 ownership/grants).
+# Prefers a host pg_dump; falls back to a dockerized client with <dir> mounted.
+pg_dump_db() {
+    local db="$1" dir="$2" host="${POSTGRES_HOST:-localhost}"
+    if command -v pg_dump >/dev/null 2>&1; then
+        host="${host/host.docker.internal/localhost}"
+        PGPASSWORD="${POSTGRES_PASSWORD:-}" pg_dump -h "$host" -p "${POSTGRES_PORT:-5432}" \
+            -U "${POSTGRES_USER:-postgres}" -Fc --create -d "$db" -f "${dir}/${db}.dump"
+    else
+        host="${host//127.0.0.1/host.docker.internal}"; host="${host//localhost/host.docker.internal}"
+        docker run --rm --add-host=host.docker.internal:host-gateway \
+            -e PGPASSWORD="${POSTGRES_PASSWORD:-}" -v "${dir}:/backup" \
+            "${LAKEHOUSE_PG_CLIENT_IMAGE:-postgres:15-alpine}" \
+            pg_dump -h "$host" -p "${POSTGRES_PORT:-5432}" -U "${POSTGRES_USER:-postgres}" \
+            -Fc --create -d "$db" -f "/backup/${db}.dump"
+    fi
+}
+
+# Restore a single database from <dir>/<db>.dump. --create --clean --if-exists drops
+# and recreates the DB with its backed-up owner, then restores objects+grants. We
+# terminate live backends first so the DROP can proceed (the writers are already
+# quiesced; this clears any stray session).
+pg_restore_db() {
+    local db="$1" dir="$2" host="${POSTGRES_HOST:-localhost}"
+    pg_psql -d postgres -c \
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${db}' AND pid <> pg_backend_pid();" \
+        >/dev/null 2>&1 || true
+    if command -v pg_restore >/dev/null 2>&1; then
+        host="${host/host.docker.internal/localhost}"
+        PGPASSWORD="${POSTGRES_PASSWORD:-}" pg_restore -h "$host" -p "${POSTGRES_PORT:-5432}" \
+            -U "${POSTGRES_USER:-postgres}" --create --clean --if-exists -d postgres "${dir}/${db}.dump"
+    else
+        host="${host//127.0.0.1/host.docker.internal}"; host="${host//localhost/host.docker.internal}"
+        docker run --rm --add-host=host.docker.internal:host-gateway \
+            -e PGPASSWORD="${POSTGRES_PASSWORD:-}" -v "${dir}:/backup:ro" \
+            "${LAKEHOUSE_PG_CLIENT_IMAGE:-postgres:15-alpine}" \
+            pg_restore -h "$host" -p "${POSTGRES_PORT:-5432}" -U "${POSTGRES_USER:-postgres}" \
+            --create --clean --if-exists -d postgres "/backup/${db}.dump"
+    fi
+}
+
+# Sync between S3 and a LOCAL directory. Prefers host aws; else a dockerized aws-cli
+# with the local dir mounted. Endpoint host mapping mirrors aws_s3().
+#   download : s3://<bucket>/ -> <localdir>/
+#   upload   : <localdir>/    -> s3://<bucket>/ --delete  (removes strays, T-1.5.5b)
+s3_sync() {
+    local direction="$1" bucket="$2" localdir="$3"
+    local ep="${S3_ENDPOINT:-http://localhost:8333}"
+    local extra=()
+    if command -v aws >/dev/null 2>&1; then
+        ep="${ep/host.docker.internal/localhost}"
+        local src dst
+        if [ "$direction" = download ]; then src="s3://${bucket}/"; dst="${localdir}/"
+        else src="${localdir}/"; dst="s3://${bucket}/"; extra=(--delete); fi
+        AWS_ACCESS_KEY_ID="${S3_ACCESS_KEY:-}" AWS_SECRET_ACCESS_KEY="${S3_SECRET_KEY:-}" \
+            aws --endpoint-url "$ep" s3 sync "$src" "$dst" "${extra[@]}"
+    else
+        ep="${ep//127.0.0.1/host.docker.internal}"; ep="${ep//localhost/host.docker.internal}"
+        local src dst
+        if [ "$direction" = download ]; then src="s3://${bucket}/"; dst="/data/"
+        else src="/data/"; dst="s3://${bucket}/"; extra=(--delete); fi
+        docker run --rm --add-host=host.docker.internal:host-gateway \
+            -e AWS_ACCESS_KEY_ID="${S3_ACCESS_KEY:-}" -e AWS_SECRET_ACCESS_KEY="${S3_SECRET_KEY:-}" \
+            -v "${localdir}:/data" \
+            "${LAKEHOUSE_AWSCLI_IMAGE:-amazon/aws-cli:latest}" \
+            --endpoint-url "$ep" s3 sync "$src" "$dst" "${extra[@]}"
+    fi
+}
+
+# tar a docker named volume's contents to <dir>/<vol>.tar (best-effort — an absent
+# volume is skipped, not an error: not every declared volume is materialised).
+volume_backup() {
+    local vol="$1" dir="$2"
+    if ! docker volume inspect "$vol" >/dev/null 2>&1; then
+        echo -e "  ${YELLOW}!${NC} volume ${vol} absent — skipping" >&2
+        return 0
+    fi
+    docker run --rm -v "${vol}:/v:ro" -v "${dir}:/backup" \
+        "${LAKEHOUSE_ALPINE_IMAGE:-alpine:latest}" \
+        tar cf "/backup/${vol}.tar" -C /v . || return 1
+    return 0
+}
+
+# Restore a docker named volume from its tar (recreate volume, wipe, extract).
+volume_restore() {
+    local vol="$1" tarfile="$2"
+    [ -f "$tarfile" ] || return 0
+    docker volume create "$vol" >/dev/null 2>&1 || true
+    docker run --rm -v "${vol}:/v" -v "$(dirname "$tarfile"):/backup:ro" \
+        "${LAKEHOUSE_ALPINE_IMAGE:-alpine:latest}" \
+        sh -c "rm -rf /v/..?* /v/.[!.]* /v/* 2>/dev/null; tar xf \"/backup/$(basename "$tarfile")\" -C /v" || return 1
+    return 0
+}
+
+# Copy the resolved UC container's H2 file OUT to <dir>/uc/ (docker cp works on a
+# stopped container, so the file is at rest during the quiesced window). Best-effort.
+uc_h2_backup() {
+    local dir="$1" uc
+    uc=$(resolve_container_name unity-catalog)
+    if ! docker container inspect "$uc" >/dev/null 2>&1; then
+        echo -e "  ${YELLOW}!${NC} UC container ${uc} absent — no H2 state to back up" >&2
+        return 0
+    fi
+    mkdir -p "${dir}/uc"
+    docker cp "${uc}:/home/unitycatalog/etc/db/h2db.mv.db" "${dir}/uc/h2db.mv.db" 2>/dev/null \
+        || echo -e "  ${YELLOW}!${NC} UC H2 file not found in ${uc}" >&2
+    return 0
+}
+
+# Copy an H2 file back INTO the resolved (stopped) UC container; the caller restarts
+# UC afterwards so it reloads the restored state. Hard-fails if UC is absent.
+uc_h2_restore() {
+    local dir="$1" uc
+    uc=$(resolve_container_name unity-catalog)
+    [ -f "${dir}/uc/h2db.mv.db" ] || return 0
+    if ! docker container inspect "$uc" >/dev/null 2>&1; then
+        echo -e "  ${RED}!${NC} UC container ${uc} absent — cannot restore H2 state" >&2
+        return 1
+    fi
+    docker cp "${dir}/uc/h2db.mv.db" "${uc}:/home/unitycatalog/etc/db/h2db.mv.db" || return 1
+    return 0
+}
+
+# Take a full snapshot into <dir>. ASSUMES the writers are already quiesced. Does NOT
+# quiesce or restart (so restore can reuse it inside one window, plan 1.16.9). Writes
+# MANIFEST LAST — its presence is the success marker restore checks. Fail-stop.
+backup_take_snapshot() {
+    local dir="$1"
+    mkdir -p "${dir}/pg" "${dir}/s3" "${dir}/volumes"
+
+    local bucket uc db dbs="" vols="" v vn
+    bucket=$(reset_effective_bucket)
+    uc=$(detect_uc_backend)
+
+    # PostgreSQL — every platform database (+ a PostgreSQL-backed UC DB, if any).
+    for db in airflow iceberg_catalog mlflow; do dbs="${dbs} $(reset_effective_db "$db")"; done
+    [ "${uc%%:*}" = postgresql ] && dbs="${dbs} $(reset_effective_db "${uc#postgresql:}")"
+    for db in $dbs; do
+        echo -e "${YELLOW}Dumping database ${db}...${NC}"
+        pg_dump_db "$db" "${dir}/pg" || return 1
+    done
+
+    # S3 objects.
+    echo -e "${YELLOW}Syncing s3://${bucket}/ ...${NC}"
+    s3_sync download "$bucket" "${dir}/s3" || return 1
+
+    # UC state via docker cp (only when the backend is embedded H2).
+    if [ "$uc" = h2 ]; then
+        echo -e "${YELLOW}Copying Unity Catalog H2 state...${NC}"
+        uc_h2_backup "$dir" || return 1
+    fi
+
+    # Named volumes (absent ones skipped).
+    for v in $(reset_discover_volumes); do
+        vn=$(reset_effective_volume "$v")
+        echo -e "${YELLOW}Archiving volume ${vn}...${NC}"
+        volume_backup "$vn" "${dir}/volumes" || return 1
+        vols="${vols} ${vn}"
+    done
+
+    {
+        echo "lakehouse-backup"
+        echo "version=1"
+        echo "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "overlay_active=${OVERLAY_ACTIVE:-false}"
+        echo "run_id=${LAKEHOUSE_TEST_RUN_ID:-}"
+        echo "bucket=${bucket}"
+        echo "uc_backend=${uc}"
+        echo "databases=${dbs# }"
+        echo "volumes=${vols# }"
+    } > "${dir}/MANIFEST"
+    return 0
+}
+
+# ./lakehouse backup [--out <dir>] [--yes]
+# Non-destructive: dumps every PostgreSQL DB, syncs S3, archives named volumes, and
+# copies UC's H2 (T-1.5.5). Quiesces writers for a consistent snapshot, then ALWAYS
+# restarts them — backup mutates nothing (I-52a, plan 1.16.5). Prints the artifact
+# path and a ready-to-paste `restore --from` command (U-63).
 cmd_backup() {
-    echo "backup: implemented in Checkpoint 4 of this PR (PR #0)." >&2
-    return 3
+    local out=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --out)     out="$2"; shift 2 ;;
+            --yes|-y)  shift ;;  # accepted for symmetry; backup needs no confirmation
+            *) echo "backup: unknown argument '$1'" >&2; return 2 ;;
+        esac
+    done
+    header "BACKUP"
+
+    if [ -z "$out" ]; then
+        local tag="" ts
+        ts=$(date -u +%Y%m%dT%H%M%SZ)
+        [ "${OVERLAY_ACTIVE:-false}" = true ] && tag="-${LAKEHOUSE_TEST_RUN_ID}"
+        out="${PROJECT_ROOT}/backups/lakehouse-backup-${ts}${tag}"
+    fi
+    mkdir -p "$out"
+
+    backup_quiesce_writers
+    local rc=0
+    backup_take_snapshot "$out" || rc=$?
+    backup_unquiesce_writers  # always — backup is non-mutating
+
+    if [ "$rc" -ne 0 ]; then
+        echo -e "${RED}Backup FAILED.${NC} Partial artifact left at: ${out}" >&2
+        return 1
+    fi
+    echo -e "${GREEN}Backup complete:${NC} ${out}"
+    echo "Restore it with:"
+    echo "  ./lakehouse restore --from ${out}"
+    return 0
 }
+
+restore_marker_path() { echo "$PROJECT_ROOT/.lakehouse-restore-interrupted"; }
+
+# On a FAILED restore, leave services stopped and drop a marker with the exact
+# rollback command (plan 1.15.4 / 1.17.8). doctor reports it in Checkpoint 5.
+restore_write_marker() {
+    local from="$1" snap="$2"
+    cat > "$(restore_marker_path)" <<EOF
+interrupted-restore
+from=${from}
+pre_restore_snapshot=${snap}
+timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+overlay_active=${OVERLAY_ACTIVE:-false}
+note=A restore failed mid-operation. Services were left STOPPED. Roll back with:
+note=  ./lakehouse restore --from ${snap} --yes
+EOF
+    return 0
+}
+
+# Apply a backup from <dir> (fail-stop, no restart). ASSUMES a quiesced window.
+# Recreates databases (owner/grants from the dump), syncs S3 with --delete, restores
+# volumes, and reinstates UC's H2. Under an active overlay, refuses any backup whose
+# recorded targets are not run-scoped (defense in depth beyond reset_semantic_gate).
+restore_apply() {
+    local dir="$1"
+    if [ ! -f "${dir}/MANIFEST" ]; then
+        echo -e "${RED}restore: no MANIFEST in ${dir} — not a complete backup${NC}" >&2
+        return 1
+    fi
+    local bucket dbs vols ucb
+    bucket=$(grep '^bucket=' "${dir}/MANIFEST" | cut -d= -f2-)
+    dbs=$(grep '^databases=' "${dir}/MANIFEST" | cut -d= -f2-)
+    vols=$(grep '^volumes=' "${dir}/MANIFEST" | cut -d= -f2-)
+    ucb=$(grep '^uc_backend=' "${dir}/MANIFEST" | cut -d= -f2-)
+
+    if [ "${OVERLAY_ACTIVE:-false}" = true ]; then
+        if ! overlay_validate_targets --runid "$LAKEHOUSE_TEST_RUN_ID" --active true \
+             --databases "$dbs" --buckets "$bucket" --volumes "$vols"; then
+            echo -e "${RED}restore: backup targets are not scoped to run-id '${LAKEHOUSE_TEST_RUN_ID}' — refusing${NC}" >&2
+            return 1
+        fi
+    fi
+
+    local db v
+    for db in $dbs; do
+        echo -e "${YELLOW}Restoring database ${db}...${NC}"
+        pg_restore_db "$db" "${dir}/pg" || return 1
+    done
+
+    echo -e "${YELLOW}Restoring objects into s3://${bucket}/ (sync --delete)...${NC}"
+    s3_sync upload "$bucket" "${dir}/s3" || return 1
+
+    for v in $vols; do
+        echo -e "${YELLOW}Restoring volume ${v}...${NC}"
+        volume_restore "$v" "${dir}/volumes/${v}.tar" || return 1
+    done
+
+    if [ "$ucb" = h2 ] && [ -f "${dir}/uc/h2db.mv.db" ]; then
+        echo -e "${YELLOW}Restoring Unity Catalog H2 state...${NC}"
+        uc_h2_restore "$dir" || return 1
+    fi
+    return 0
+}
+
+# ./lakehouse restore --from <path> [--yes]
+# FAIL-STOP and RECOVERABLE, not atomic (plan 1.15.4). Inside a SINGLE quiesced
+# window (plan 1.16.9): quiesce -> pre-restore snapshot (same snapshot path, no
+# restart) -> mutate. On failure: leave services stopped, preserve a marker, print
+# the rollback command. On success: clear the marker and restart the prior set.
 cmd_restore() {
-    echo "restore: implemented in Checkpoint 4 of this PR (PR #0)." >&2
-    return 3
+    local from="" assume_yes=false
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --from)    from="$2"; shift 2 ;;
+            --yes|-y)  assume_yes=true; shift ;;
+            *) echo "restore: unknown argument '$1'" >&2; return 2 ;;
+        esac
+    done
+
+    if [ -z "$from" ]; then
+        echo "restore: --from <path> is required" >&2
+        return 2
+    fi
+    if [ ! -d "$from" ] || [ ! -f "${from}/MANIFEST" ]; then
+        echo "restore: '${from}' is not a complete backup artifact (missing MANIFEST)" >&2
+        return 2
+    fi
+    header "RESTORE"
+
+    if [ "$assume_yes" != true ]; then
+        if [ -t 0 ]; then
+            echo -e "${RED}This REPLACES databases, object storage (sync --delete), and volumes from ${from}.${NC} Type 'yes' to proceed:"
+            local reply
+            read -r reply
+            [ "$reply" = yes ] || { echo "Aborted."; return 1; }
+        else
+            echo "restore: refusing a destructive restore without --yes (non-interactive)" >&2
+            return 1
+        fi
+    fi
+
+    reset_semantic_gate || return 1
+
+    backup_quiesce_writers
+
+    local ts snap
+    ts=$(date -u +%Y%m%dT%H%M%SZ)
+    snap="${PROJECT_ROOT}/backups/pre-restore-${ts}"
+    mkdir -p "$snap"
+    echo -e "${YELLOW}Taking pre-restore snapshot at ${snap}...${NC}"
+    if ! backup_take_snapshot "$snap"; then
+        # Failed BEFORE any mutation — safe to restart and abort with nothing changed.
+        backup_unquiesce_writers
+        echo -e "${RED}restore: pre-restore snapshot failed; nothing was changed.${NC}" >&2
+        return 1
+    fi
+
+    if ! restore_apply "$from"; then
+        restore_write_marker "$from" "$snap"
+        echo -e "${RED}Restore FAILED mid-operation.${NC} Services left STOPPED to avoid compounding corruption." >&2
+        echo -e "  Pre-restore snapshot: ${snap}" >&2
+        echo -e "  Roll back with: ./lakehouse restore --from ${snap} --yes" >&2
+        echo -e "  Marker: $(restore_marker_path)" >&2
+        return 1
+    fi
+
+    rm -f "$(restore_marker_path)" 2>/dev/null || true
+    backup_unquiesce_writers
+    echo -e "${GREEN}Restore complete from ${from}.${NC}"
+    echo -e "  Pre-restore snapshot kept at: ${snap}"
+    return 0
 }
+
+# doctor — registered now (U-28); body lands in Checkpoint 5 of this PR.
 cmd_doctor() {
     echo "doctor: implemented in Checkpoint 5 of this PR (PR #0)." >&2
     return 3
@@ -2023,8 +2405,8 @@ Commands:
   browsedata [table]  Browse Iceberg table rows (default: iceberg.bronze.orders)
   reset <mode>        Reset environment: --data | --metadata | --all
                         [--keep-mlflow] [--dry-run] [--yes]
-  backup              Back up all databases + object store + volumes
-  restore --from <p>  Restore from a backup artifact
+  backup [--out <d>]  Back up all databases + object store + volumes + UC state
+  restore --from <p>  Restore from a backup artifact (fail-stop; --yes to skip prompt)
   doctor              Report orphaned data / catalog inconsistencies
   help                Show this help
 

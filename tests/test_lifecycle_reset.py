@@ -7,6 +7,9 @@
     U-52  flag validation
     U-53  named volumes are assigned to a reset mode (or never-destroy)
     U-54  production reset is NOT name-pattern restricted
+    U-31  backup/restore argument contract (Checkpoint 4)
+    U-48  backup covers PostgreSQL — pg_dump per DB + S3 sync, not volume-only (CP4)
+    U-63  backup prints a ready-to-paste `restore --from` command (CP4)
 
 All unit-level: static scans of `lakehouse` + running `reset --dry-run` (which
 touches nothing). No Docker required.
@@ -373,3 +376,81 @@ class TestU66bGateWiredIntoReset:
 
     def test_bad_container_class_aborts(self):
         assert _run_gate({**self.GOOD, "LAKEHOUSE_RESOURCE_SUFFIX": "other999"}) != 0
+
+
+# --- U-31 (Checkpoint 4): backup/restore argument contract -----------------------
+
+
+class TestU31BackupRestoreArgs:
+    def test_restore_without_from_exits_nonzero(self):
+        assert _run("restore").returncode != 0
+
+    def test_restore_missing_artifact_exits_nonzero(self):
+        assert _run("restore", "--from", "/nonexistent/backup/dir").returncode != 0
+
+    def test_restore_incomplete_artifact_exits_nonzero(self, tmp_path):
+        # A directory without a MANIFEST is not a complete backup.
+        d = tmp_path / "half"
+        d.mkdir()
+        assert _run("restore", "--from", str(d)).returncode != 0
+
+    def test_restore_requires_yes_non_interactive(self, tmp_path):
+        # A complete-looking artifact still must not be applied without --yes
+        # when stdin is not a TTY (the test harness).
+        d = tmp_path / "art"
+        d.mkdir()
+        (d / "MANIFEST").write_text(
+            "lakehouse-backup\nbucket=x\ndatabases=\nvolumes=\nuc_backend=h2\n"
+        )
+        r = _run("restore", "--from", str(d))
+        assert r.returncode != 0
+        assert "without --yes" in (r.stdout + r.stderr)
+
+    def test_backup_rejects_unknown_flag(self):
+        assert _run("backup", "--bogus").returncode == 2
+
+
+# --- U-48 (Checkpoint 4): backup covers PostgreSQL, not volume-only --------------
+
+
+class TestU48BackupCoversPostgres:
+    def test_snapshot_dumps_every_database(self):
+        body = _func_body("backup_take_snapshot")
+        # It iterates the platform databases and calls pg_dump_db on each.
+        assert "pg_dump_db" in body
+        for db in ("airflow", "iceberg_catalog", "mlflow"):
+            assert db in body, f"backup must cover the {db} database"
+
+    def test_snapshot_syncs_s3_and_is_not_volume_only(self):
+        body = _func_body("backup_take_snapshot")
+        assert "s3_sync download" in body, "backup must sync S3 objects"
+        assert "volume_backup" in body, "backup must also archive named volumes"
+        # Not volume-only: PostgreSQL + S3 coverage present alongside volumes.
+        assert "pg_dump_db" in body and "s3_sync" in body
+
+    def test_pg_dump_uses_create_for_ownership(self):
+        # --create carries CREATE DATABASE ... OWNER + grants (I-29 ownership).
+        assert "--create" in _func_body("pg_dump_db")
+
+    def test_uc_h2_captured_via_docker_cp(self):
+        # UC state is backed up by docker cp of the H2 file (plan 1.15.1), not a
+        # PostgreSQL dump of a non-existent unity_catalog DB by default.
+        assert "docker cp" in _func_body("uc_h2_backup")
+
+
+# --- U-63 (Checkpoint 4): backup prints the restore command ----------------------
+
+
+class TestU63BackupPrintsRestoreCommand:
+    def test_cmd_backup_prints_artifact_path_and_restore_command(self):
+        body = _func_body("cmd_backup")
+        # Prints the artifact path ($out) and a ready-to-paste restore invocation.
+        assert "restore --from" in body
+        assert "${out}" in body
+
+    def test_restore_accepts_only_from(self):
+        # Covered behaviourally by U-31 (bare restore exits non-zero); assert the
+        # flag surface too: --from is the only positional-bearing option.
+        body = _func_body("cmd_restore")
+        assert "--from" in body
+        assert "--from <path> is required" in body

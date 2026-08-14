@@ -11,6 +11,16 @@
     I-54  post-reset assertion is APPLICATION-empty, not table-empty
     I-55  a mis-targeted overlay reset aborts (parameterized over all four classes)
 
+Checkpoint 4 (backup / restore):
+    I-29  backup -> reset --all -> restore round-trips EVERYTHING promised —
+          PostgreSQL DBs + rows + ownership, S3 keys, a named-volume sentinel, and
+          UC TABLES (via a real run-scoped UC + the H2 docker-cp path)
+    I-51  restore is fail-stop and recoverable: a mid-restore failure leaves a
+          pre-restore snapshot, a marker, and a rollback command that recovers
+    I-52a backup ALWAYS restores the running set — on success AND on failure
+    I-53  restore's pre-restore snapshot + mutation share ONE quiesced window: the
+          quiesced writer is stopped once and restarted once, only after mutation
+
 FAIL-CLOSED: these skip unless LAKEHOUSE_TEST_RUN_ID is set (isolation guard),
 Docker is available, and the host PostgreSQL + SeaweedFS are reachable. Every
 resource is run-scoped (ol_test_<runid>_* / ol-test-<runid>); the real stack is
@@ -19,9 +29,12 @@ never touched.
 
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -449,3 +462,453 @@ def test_failed_reset_writes_marker_and_leaves_stopped(env, tmp_path):
         assert "interrupted-reset" in marker.read_text()
     finally:
         marker.unlink(missing_ok=True)
+
+
+# --- Checkpoint 4: backup / restore ----------------------------------------------
+
+REAL_DOCKER = shutil.which("docker")
+
+UC_IMAGE = os.environ.get("LAKEHOUSE_UC_IMAGE", "newfrontdocker/unitycatalog:v0.4.1")
+PY_IMAGE = os.environ.get("LAKEHOUSE_HTTP_IMAGE", "python:3-alpine")
+ALPINE_IMAGE = os.environ.get("LAKEHOUSE_ALPINE_IMAGE", "alpine:latest")
+
+
+def _backup(env, out, *args, extra_env=None):
+    return subprocess.run(
+        [str(LAKEHOUSE), "backup", "--out", str(out), *args],
+        cwd=REPO_ROOT,
+        env={**env["overlay"], **(extra_env or {})},
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+
+
+def _restore(env, frm, *args, extra_env=None):
+    return subprocess.run(
+        [str(LAKEHOUSE), "restore", "--from", str(frm), *args],
+        cwd=REPO_ROOT,
+        env={**env["overlay"], **(extra_env or {})},
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+
+
+def _seed_volume(env, short_name: str, content: str) -> str:
+    """Create the run-scoped docker volume ol-test-<rid>_<short> with a sentinel."""
+    vol = f"ol-test-{env['rid']}_{short_name}"
+    subprocess.run(["docker", "volume", "rm", vol], capture_output=True)
+    subprocess.run(["docker", "volume", "create", vol], capture_output=True, check=True)
+    subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "-v",
+            f"{vol}:/v",
+            ALPINE_IMAGE,
+            "sh",
+            "-c",
+            f"printf %s '{content}' > /v/marker.txt",
+        ],
+        capture_output=True,
+        check=True,
+    )
+    return vol
+
+
+def _volume_sentinel(vol: str) -> str | None:
+    r = subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "-v",
+            f"{vol}:/v:ro",
+            ALPINE_IMAGE,
+            "sh",
+            "-c",
+            "cat /v/marker.txt 2>/dev/null || true",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    return r.stdout if r.stdout else None
+
+
+def _volume_exists(vol: str) -> bool:
+    return (
+        subprocess.run(
+            ["docker", "volume", "inspect", vol], capture_output=True
+        ).returncode
+        == 0
+    )
+
+
+# --- run-scoped Unity Catalog helpers (real container, embedded H2) --------------
+
+
+def _uc_name(env) -> str:
+    return f"unity-catalog-{env['rid']}"
+
+
+def _uc_py(env, script: str) -> subprocess.CompletedProcess:
+    """Run a python snippet inside the run-scoped UC's network namespace."""
+    return subprocess.run(
+        [
+            "docker",
+            "run",
+            "--rm",
+            "-i",
+            "--network",
+            f"container:{_uc_name(env)}",
+            "--entrypoint",
+            "python3",
+            PY_IMAGE,
+            "-",
+        ],
+        input=script,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+
+def _uc_wait(env, tries: int = 40) -> bool:
+    probe = (
+        "import urllib.request;"
+        "urllib.request.urlopen("
+        "'http://localhost:8080/api/2.1/unity-catalog/catalogs', timeout=3)"
+    )
+    for _ in range(tries):
+        if _uc_py(env, probe).returncode == 0:
+            return True
+        time.sleep(3)
+    return False
+
+
+def _uc_boot(env) -> bool:
+    subprocess.run(["docker", "rm", "-f", _uc_name(env)], capture_output=True)
+    subprocess.run(
+        [
+            "docker",
+            "run",
+            "-d",
+            "--name",
+            _uc_name(env),
+            "-e",
+            "JAVA_OPTS=-Xmx1g",
+            UC_IMAGE,
+        ],
+        capture_output=True,
+        check=True,
+    )
+    return _uc_wait(env)
+
+
+def _uc_tables(env, cat="cp4cat", sch="s1") -> list[str]:
+    script = (
+        "import json,urllib.request;"
+        f"d=json.load(urllib.request.urlopen('http://localhost:8080/api/2.1/"
+        f"unity-catalog/tables?catalog_name={cat}&schema_name={sch}', timeout=10));"
+        "print(json.dumps([t['name'] for t in d.get('tables',[])]))"
+    )
+    r = _uc_py(env, script)
+    try:
+        return json.loads(r.stdout.strip().splitlines()[-1])
+    except Exception:
+        return []
+
+
+def _uc_create_table(env, cat="cp4cat", sch="s1", tbl="t1") -> None:
+    script = f"""
+import json, urllib.request
+api = "http://localhost:8080/api/2.1/unity-catalog"
+def post(path, body):
+    r = urllib.request.Request(api + path, data=json.dumps(body).encode(),
+        headers={{"Content-Type": "application/json"}}, method="POST")
+    urllib.request.urlopen(r, timeout=10)
+post("/catalogs", {{"name": "{cat}"}})
+post("/schemas", {{"name": "{sch}", "catalog_name": "{cat}"}})
+post("/tables", {{"name": "{tbl}", "catalog_name": "{cat}", "schema_name": "{sch}",
+    "table_type": "EXTERNAL", "data_source_format": "DELTA",
+    "storage_location": "s3://ol-test-{env['rid']}/warehouse/{tbl}",
+    "columns": [{{"name": "id", "type_text": "int", "type_name": "INT",
+                 "type_json": "{{}}", "position": 0, "nullable": True}}]}})
+print("ok")
+"""
+    assert _uc_py(env, script).stdout.strip().endswith("ok")
+
+
+def _uc_delete_table(env, cat="cp4cat", sch="s1", tbl="t1") -> None:
+    script = (
+        "import urllib.request;"
+        f"r=urllib.request.Request('http://localhost:8080/api/2.1/unity-catalog/"
+        f"tables/{cat}.{sch}.{tbl}', method='DELETE');"
+        "urllib.request.urlopen(r, timeout=10)"
+    )
+    _uc_py(env, script)
+
+
+# --- I-29: backup -> reset --all -> restore round-trips EVERYTHING ---------------
+
+
+@pytest.mark.slow
+def test_i29_round_trip_covers_everything(env):
+    # Seed PostgreSQL (rows + ownership), S3 objects, a named-volume sentinel, and a
+    # real run-scoped Unity Catalog with a table (exercising the H2 docker-cp path).
+    _seed(env)
+    vol = _seed_volume(env, "spark-data", "SENTINEL-29")
+    if not _uc_boot(env):
+        pytest.skip("run-scoped Unity Catalog did not become ready")
+    try:
+        _uc_create_table(env)
+        assert _uc_tables(env) == ["t1"], "precondition: t1 registered"
+
+        backup_dir = REPO_ROOT / ".smoke" / f"bk-{env['rid']}"
+        b = _backup(env, backup_dir)
+        assert b.returncode == 0, b.stderr
+        # UC must have been quiesced+restarted and its H2 captured via docker cp.
+        assert (backup_dir / "uc" / "h2db.mv.db").exists(), "UC H2 not in backup"
+        assert (backup_dir / "MANIFEST").exists()
+        assert _uc_wait(env), "UC must restart after backup"
+
+        # Destroy: reset --all wipes DB rows, S3 objects, and the data volume; and
+        # delete the UC table so restore must bring it back.
+        r = _reset(env, "--all", "--yes")
+        assert r.returncode == 0, r.stderr
+        assert _uc_wait(env), "UC restarts after reset"
+        _uc_delete_table(env)
+        assert _uc_tables(env) == [], "UC table cleared before restore"
+        assert _count_objects(env, "") == 0
+        assert not _volume_exists(vol), "data volume removed by reset --all"
+
+        # Restore everything.
+        rr = _restore(env, backup_dir, "--yes")
+        assert rr.returncode == 0, rr.stderr
+        assert _uc_wait(env), "UC restarts after restore"
+
+        # PostgreSQL rows + ownership.
+        assert _rows(env["dbs"]["mlflow"], "runs") == 2
+        assert _rows(env["dbs"]["iceberg_catalog"], "iceberg_tables") == 1
+        assert _db_owner(env["dbs"]["mlflow"]) == PG_USER
+        # S3 keys.
+        assert _count_objects(env, "warehouse/") == 1
+        assert _count_objects(env, "mlflow-artifacts/") == 1
+        # Volume sentinel.
+        assert _volume_sentinel(vol) == "SENTINEL-29"
+        # UC tables (the headline of I-29).
+        assert _uc_tables(env) == ["t1"], "UC table restored via H2 docker-cp"
+    finally:
+        subprocess.run(["docker", "rm", "-f", _uc_name(env)], capture_output=True)
+        # reset restarts UC via `docker compose up`, which materialises the
+        # run-scoped never-destroy volumes (uc-logs, ...); sweep every run-scoped
+        # volume so the test leaves nothing behind.
+        _rm_run_volumes(env)
+        _rmtree(REPO_ROOT / ".smoke" / f"bk-{env['rid']}")
+        _rmtree(REPO_ROOT / "backups")
+
+
+def _rm_run_volumes(env) -> None:
+    r = subprocess.run(["docker", "volume", "ls", "-q"], capture_output=True, text=True)
+    for v in r.stdout.split():
+        if v.startswith(f"ol-test-{env['rid']}_"):
+            subprocess.run(["docker", "volume", "rm", v], capture_output=True)
+
+
+def _rmtree(p: Path):
+    if p.exists():
+        shutil.rmtree(p, ignore_errors=True)
+
+
+# --- I-51: restore is fail-stop and recoverable ----------------------------------
+
+
+def test_i51_restore_fail_stop_and_recoverable(env, tmp_path):
+    # Take a real backup, then corrupt one DB dump so pg_restore fails PART-WAY (the
+    # airflow/iceberg dumps restore first; the poisoned mlflow dump then fails).
+    _seed(env)
+    good = REPO_ROOT / ".smoke" / f"bk51-{env['rid']}"
+    _rmtree(good)
+    b = _backup(env, good)
+    assert b.returncode == 0, b.stderr
+
+    poison = tmp_path / "poison"
+    poison.mkdir()
+    (poison / "pg").mkdir()
+    (poison / "s3").mkdir()
+    (poison / "volumes").mkdir()
+    for db in ("airflow", "iceberg_catalog"):
+        (poison / "pg" / f"{env['dbs'][db]}.dump").write_bytes(
+            (good / "pg" / f"{env['dbs'][db]}.dump").read_bytes()
+        )
+    (poison / "pg" / f"{env['dbs']['mlflow']}.dump").write_text("NOT-A-VALID-DUMP")
+    (poison / "MANIFEST").write_text(
+        "lakehouse-backup\nversion=1\n"
+        f"bucket={env['bucket']}\nuc_backend=h2\n"
+        f"databases={env['dbs']['airflow']} {env['dbs']['iceberg_catalog']} "
+        f"{env['dbs']['mlflow']}\nvolumes=\n"
+    )
+    marker = REPO_ROOT / ".lakehouse-restore-interrupted"
+    marker.unlink(missing_ok=True)
+    try:
+        r = _restore(env, poison, "--yes")
+        assert r.returncode != 0, "a mid-restore failure must exit non-zero"
+        out = r.stdout + r.stderr
+        assert "left stopped" in out.lower()
+        # A pre-restore snapshot exists, and the marker records the rollback command.
+        assert marker.exists(), "an interrupted-restore marker must be written"
+        mtext = marker.read_text()
+        assert "interrupted-restore" in mtext
+        snap = next(
+            ln.split("=", 1)[1]
+            for ln in mtext.splitlines()
+            if ln.startswith("pre_restore_snapshot=")
+        )
+        assert (Path(snap) / "MANIFEST").exists(), "pre-restore snapshot is complete"
+        assert "restore --from" in out and snap in out, "rollback command printed"
+
+        # Rolling back from the pre-restore snapshot recovers and CLEARS the marker.
+        rb = _restore(env, snap, "--yes")
+        assert rb.returncode == 0, rb.stderr
+        assert not marker.exists(), "successful recovery clears the marker"
+        assert _rows(env["dbs"]["mlflow"], "runs") == 2
+    finally:
+        marker.unlink(missing_ok=True)
+        _rmtree(good)
+        _rmtree(REPO_ROOT / "backups")
+
+
+# --- I-52a: backup ALWAYS restores the running set -------------------------------
+
+
+@pytest.mark.slow
+def test_i52a_backup_always_restores_running_set(env, tmp_path):
+    # A stub "writer" container named as a resolved writer (spark-master-41-<rid>)
+    # stands in for a running writer. Backup must stop it, snapshot, then restart it
+    # — on success AND on a failed snapshot (backup mutates nothing, plan 1.16.5).
+    _seed(env)
+    writer = f"spark-master-41-{env['rid']}"
+    subprocess.run(["docker", "rm", "-f", writer], capture_output=True)
+    subprocess.run(
+        ["docker", "run", "-d", "--name", writer, ALPINE_IMAGE, "sleep", "600"],
+        capture_output=True,
+        check=True,
+    )
+
+    def running() -> bool:
+        return (
+            writer
+            in subprocess.run(
+                ["docker", "ps", "--format", "{{.Names}}"],
+                capture_output=True,
+                text=True,
+            ).stdout.split()
+        )
+
+    try:
+        assert running(), "precondition: stub writer up"
+
+        # (1) success path
+        ok_dir = REPO_ROOT / ".smoke" / f"bk52-{env['rid']}"
+        _rmtree(ok_dir)
+        b = _backup(env, ok_dir)
+        assert b.returncode == 0, b.stderr
+        assert running(), "writer restarted after a successful backup"
+
+        # (2) failure path — unreachable PostgreSQL makes the snapshot fail.
+        bad_env = tmp_path / "bad.env"
+        bad_env.write_text(
+            Path(env["overlay"]["LAKEHOUSE_ENV_FILE"])
+            .read_text()
+            .replace(f"POSTGRES_PORT={PG_PORT}", "POSTGRES_PORT=5599")
+        )
+        fail_dir = REPO_ROOT / ".smoke" / f"bk52f-{env['rid']}"
+        _rmtree(fail_dir)
+        bf = _backup(env, fail_dir, extra_env={"LAKEHOUSE_ENV_FILE": str(bad_env)})
+        assert bf.returncode != 0, "a failed snapshot must exit non-zero"
+        assert running(), "writer restarted even after a FAILED backup (non-mutating)"
+    finally:
+        subprocess.run(["docker", "rm", "-f", writer], capture_output=True)
+        _rmtree(REPO_ROOT / ".smoke" / f"bk52-{env['rid']}")
+        _rmtree(REPO_ROOT / ".smoke" / f"bk52f-{env['rid']}")
+        _rmtree(REPO_ROOT / "backups")
+
+
+# --- I-53: restore snapshot + mutation share ONE quiesced window -----------------
+
+
+def _docker_shim(bindir: Path, logfile: Path) -> None:
+    """Write a `docker` shim that logs every invocation then forwards to real docker.
+
+    The log lets a test assert the stop/start SEQUENCE around a restore without
+    touching the engine. Everything is forwarded, so dockerized pg/aws clients and
+    `docker ps` still work normally.
+    """
+    assert REAL_DOCKER, "real docker path required for the shim"
+    bindir.mkdir(parents=True, exist_ok=True)
+    shim = bindir / "docker"
+    shim.write_text(
+        "#!/usr/bin/env bash\n"
+        f'echo "$*" >> "{logfile}"\n'
+        f'exec "{REAL_DOCKER}" "$@"\n'
+    )
+    shim.chmod(0o755)
+
+
+@pytest.mark.slow
+def test_i53_restore_single_quiesced_window(env, tmp_path):
+    # Instrument docker calls during a restore. The quiesced writer must be stopped
+    # exactly ONCE and started exactly ONCE, and that start must come AFTER the
+    # mutation (pg_restore) — never between the pre-restore snapshot and the mutation
+    # (plan 1.16.9).
+    if not REAL_DOCKER:
+        pytest.skip("docker not on PATH")
+    _seed(env)
+    writer = f"spark-master-41-{env['rid']}"
+    subprocess.run(["docker", "rm", "-f", writer], capture_output=True)
+    subprocess.run(
+        ["docker", "run", "-d", "--name", writer, ALPINE_IMAGE, "sleep", "600"],
+        capture_output=True,
+        check=True,
+    )
+    backup_dir = REPO_ROOT / ".smoke" / f"bk53-{env['rid']}"
+    _rmtree(backup_dir)
+    b = _backup(env, backup_dir)
+    assert b.returncode == 0, b.stderr
+    # ^ backup stopped+started the writer; start fresh for the observed restore.
+    subprocess.run(["docker", "start", writer], capture_output=True)
+
+    logfile = tmp_path / "docker.log"
+    bindir = tmp_path / "bin"
+    _docker_shim(bindir, logfile)
+    shim_env = {
+        **env["overlay"],
+        "PATH": f"{bindir}:{os.environ['PATH']}",
+    }
+    try:
+        r = subprocess.run(
+            [str(LAKEHOUSE), "restore", "--from", str(backup_dir), "--yes"],
+            cwd=REPO_ROOT,
+            env=shim_env,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        assert r.returncode == 0, r.stderr
+        lines = logfile.read_text().splitlines()
+        stops = [i for i, ln in enumerate(lines) if ln.startswith(f"stop {writer}")]
+        starts = [i for i, ln in enumerate(lines) if ln.startswith(f"start {writer}")]
+        assert len(stops) == 1, f"writer must be stopped once, got {stops}: {lines}"
+        assert len(starts) == 1, f"writer must be started once, got {starts}: {lines}"
+        # The single restart happens only after mutation: at least one pg_restore
+        # (dockerized client) ran, and the writer start comes after the LAST of them.
+        pg = [i for i, ln in enumerate(lines) if "pg_restore" in ln]
+        assert pg, f"expected a dockerized pg_restore in the log: {lines}"
+        assert starts[0] > max(pg), "writer restarted only AFTER mutation"
+        assert starts[0] > stops[0], "stop precedes the single restart (one window)"
+    finally:
+        subprocess.run(["docker", "rm", "-f", writer], capture_output=True)
+        _rmtree(backup_dir)
+        _rmtree(REPO_ROOT / "backups")
