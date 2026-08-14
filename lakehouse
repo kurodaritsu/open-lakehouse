@@ -2107,6 +2107,11 @@ uc_h2_restore() {
 # MANIFEST LAST — its presence is the success marker restore checks. Fail-stop.
 backup_take_snapshot() {
     local dir="$1"
+    # Clear OUR OWN subdirs so a snapshot is always an authoritative mirror even when
+    # an explicit --out is reused: the S3 download sync has no --delete, so a stale
+    # object from a prior snapshot would otherwise survive and be re-uploaded on a
+    # later restore. Scoped to the four subdirs we write — never the whole $dir.
+    rm -rf "${dir}/pg" "${dir}/s3" "${dir}/volumes" "${dir}/uc"
     mkdir -p "${dir}/pg" "${dir}/s3" "${dir}/volumes"
 
     local bucket uc db dbs="" vols="" v vn
@@ -2241,6 +2246,7 @@ restore_apply() {
     done
 
     echo -e "${YELLOW}Restoring objects into s3://${bucket}/ (sync --delete)...${NC}"
+    aws_s3 mb "s3://${bucket}" >/dev/null 2>&1 || true  # ensure the bucket exists first
     s3_sync upload "$bucket" "${dir}/s3" || return 1
 
     for v in $vols; do
