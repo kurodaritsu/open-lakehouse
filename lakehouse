@@ -1472,7 +1472,14 @@ reset_effective_db() {
 
 # $1 = short volume name -> the physical docker volume name (project-prefixed).
 reset_effective_volume() {
-    local proj="${COMPOSE_PROJECT_NAME:-$(basename "$PROJECT_ROOT")}"
+    local proj="${COMPOSE_PROJECT_NAME:-}"
+    if [ -z "$proj" ]; then
+        # Match Docker Compose's default project-name normalization of the working
+        # directory: lowercase, and keep only [a-z0-9_-]. Raw `basename` would miss
+        # this, so a repo checked out into e.g. "Open Lakehouse" would target the
+        # wrong volume name and silently leave the real data volume untouched.
+        proj="$(basename "$PROJECT_ROOT" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')"
+    fi
     echo "${proj}_$1"
 }
 
@@ -1792,11 +1799,24 @@ def req(method, path):
             return json.load(x) if method == "GET" else {}
     except Exception:
         return {}
-for cat in req("GET", "/catalogs").get("catalogs", []):
+def pages(path, key):
+    # Follow next_page_token so ALL registrations are cleared, not just page 1
+    # (else --data would wipe objects yet leave later tables registered -> orphans).
+    sep = "&" if "?" in path else "?"
+    token = None
+    while True:
+        p = path if token is None else f"{path}{sep}page_token={token}"
+        d = req("GET", p)
+        for item in d.get(key, []):
+            yield item
+        token = d.get("next_page_token")
+        if not token:
+            break
+for cat in pages("/catalogs", "catalogs"):
     c = cat["name"]
-    for sch in req("GET", f"/schemas?catalog_name={c}").get("schemas", []):
+    for sch in pages(f"/schemas?catalog_name={c}", "schemas"):
         s = sch["name"]
-        for tbl in req("GET", f"/tables?catalog_name={c}&schema_name={s}").get("tables", []):
+        for tbl in pages(f"/tables?catalog_name={c}&schema_name={s}", "tables"):
             req("DELETE", f"/tables/{c}.{s}.{tbl['name']}")
 PY
     if [ "$rc" -ne 0 ]; then
@@ -1953,8 +1973,13 @@ cmd_reset() {
 # dumped/synced. One resolved (overlay-aware) name per line.
 backup_writer_containers() {
     local c
+    # Includes spark-mlflow-agent (logs MLflow runs) and jupyter (writes S3/UC/MLflow):
+    # backup/restore quiesce with per-container `docker stop`, so every writer must be
+    # named here — unlike reset, whose cmd_stop takes a whole compose file down. Names
+    # absent from the running set are skipped (is_container_running is false).
     for c in spark-master-41 spark-worker-41 spark-connect-41 kafka zookeeper \
-             unity-catalog mlflow airflow-webserver airflow-scheduler airflow-triggerer; do
+             unity-catalog mlflow spark-mlflow-agent jupyter \
+             airflow-webserver airflow-scheduler airflow-triggerer; do
         resolve_container_name "$c"
     done
 }
@@ -2405,11 +2430,24 @@ def get(path):
             return json.load(x)
     except Exception:
         return {}
-for cat in get("/catalogs").get("catalogs", []):
+def pages(path, key):
+    # Follow next_page_token so doctor sees ALL rows, not just page 1 (else it would
+    # under-report dangling entries and mis-flag healthy prefixes as unregistered).
+    sep = "&" if "?" in path else "?"
+    token = None
+    while True:
+        p = path if token is None else f"{path}{sep}page_token={token}"
+        d = get(p)
+        for item in d.get(key, []):
+            yield item
+        token = d.get("next_page_token")
+        if not token:
+            break
+for cat in pages("/catalogs", "catalogs"):
     c = cat["name"]
-    for sch in get(f"/schemas?catalog_name={c}").get("schemas", []):
+    for sch in pages(f"/schemas?catalog_name={c}", "schemas"):
         s = sch["name"]
-        for t in get(f"/tables?catalog_name={c}&schema_name={s}").get("tables", []):
+        for t in pages(f"/tables?catalog_name={c}&schema_name={s}", "tables"):
             loc = (t.get("storage_location") or "").rstrip("/")
             print(f"{c}.{s}.{t['name']}\t{loc}")
 PY
@@ -2423,7 +2461,7 @@ doctor_inventory_s3_warehouse() {
     local bucket reg keys
     bucket=$(reset_effective_bucket)
     reg="$(doctor_uc_rows | cut -f2 | grep -v '^$' || true)"
-    keys="$(aws_s3 ls "s3://${bucket}/warehouse/" --recursive 2>/dev/null | awk '{print $4}' || true)"
+    keys="$(aws_s3 ls "s3://${bucket}/warehouse/" --recursive 2>/dev/null | awk '{$1=$2=$3=""; sub(/^[[:space:]]+/,""); print}' || true)"
 
     printf '%s\n' "$keys" | grep '/_delta_log/' 2>/dev/null \
         | sed -E 's#/_delta_log/.*$##' | sort -u | while read -r p; do
@@ -2462,7 +2500,7 @@ doctor_inventory_mlflow() {
         return 0
     fi
     known="$(pg_psql -d "$db" -tAc 'SELECT run_uuid FROM runs' 2>/dev/null | tr -d '\r' || true)"
-    keys="$(aws_s3 ls "s3://${bucket}/mlflow-artifacts/" --recursive 2>/dev/null | awk '{print $4}' || true)"
+    keys="$(aws_s3 ls "s3://${bucket}/mlflow-artifacts/" --recursive 2>/dev/null | awk '{$1=$2=$3=""; sub(/^[[:space:]]+/,""); print}' || true)"
     printf '%s\n' "$keys" | while read -r k; do
         [ -n "$k" ] || continue
         run="$(printf '%s\n' "$k" | tr '/' '\n' | grep -iE '^[0-9a-f]{32}$' | head -1)"
@@ -2481,10 +2519,20 @@ doctor_inventory_mlflow() {
 # objects (plan 1.16.8).
 doctor_inventory_uc() {
     local name loc n
+    # If S3 is unreachable we cannot tell an empty prefix (rc=1, no output) from a
+    # listing failure, so a naive count would report objects=0 and flag EVERY healthy
+    # table as dangling. Probe the bucket root once (rc=0 iff reachable, even empty);
+    # when it fails, emit objects=unknown — which doctor_classify never flags.
+    local s3_ok=1
+    aws_s3 ls "s3://$(reset_effective_bucket)/" >/dev/null 2>&1 || s3_ok=0
     while IFS=$'\t' read -r name loc; do
         [ -n "$name" ] || continue
         if [ -z "$loc" ]; then
             echo "uc-row objects=NA location_empty=yes name=${name}"
+            continue
+        fi
+        if [ "$s3_ok" -ne 1 ]; then
+            echo "uc-row objects=unknown location_empty=no name=${name}"
             continue
         fi
         n="$(aws_s3 ls "${loc}/" --recursive 2>/dev/null | grep -c . || true)"
