@@ -220,8 +220,9 @@ def _seed(env, *, rows: bool = True, objects: bool = True):
 
 
 def _seed_put(dest: str, tries: int = 6) -> None:
-    # Bounded retry: SeaweedFS intermittently returns InternalError under sustained
-    # suite load / just after bucket create. Keeps seeding deterministic.
+    # Bounded retry: SeaweedFS can return a transient InternalError — e.g. if the host
+    # sleeps mid-run (a laptop lid-close) or just after bucket create. Keeps seeding
+    # deterministic.
     last = None
     for i in range(tries):
         last = subprocess.run(

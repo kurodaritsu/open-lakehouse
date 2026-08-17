@@ -99,8 +99,9 @@ def _aws(*args: str, stdin: str | None = None) -> subprocess.CompletedProcess:
 
 
 def _put(bucket: str, key: str, body: str = "x", tries: int = 6) -> None:
-    # Bounded retry: local SeaweedFS intermittently returns InternalError under
-    # sustained suite load; without this a transient hiccup fails class manufacture.
+    # Bounded retry: local SeaweedFS can return a transient InternalError — e.g. if
+    # the host sleeps mid-run (a laptop lid-close) — without this a transient hiccup
+    # fails class manufacture.
     last = None
     for i in range(tries):
         last = subprocess.run(

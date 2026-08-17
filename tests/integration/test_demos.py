@@ -51,8 +51,9 @@ def _aws(*args: str, stdin: str | None = None) -> subprocess.CompletedProcess:
 
 
 def _put(bucket: str, key: str, tries: int = 6) -> None:
-    # Local SeaweedFS intermittently returns InternalError under sustained suite load
-    # (and just after a bucket is created). Bounded retry keeps seeding deterministic
+    # Local SeaweedFS can return a transient InternalError — e.g. if the host sleeps
+    # mid-run (a laptop lid-close pauses the container + drops the connection), or
+    # just after a bucket is created. Bounded retry keeps seeding deterministic
     # without masking a durable failure.
     last = None
     for i in range(tries):
@@ -69,8 +70,9 @@ def _count(bucket: str, prefix: str) -> int:
 
 
 def _count_stable(bucket: str, prefix: str, want: int, tries: int = 10) -> int:
-    # SeaweedFS S3 LIST is only eventually consistent under load; poll briefly so the
-    # test asserts on settled state rather than a mid-write listing.
+    # SeaweedFS S3 LIST is only eventually consistent (and the host may sleep
+    # mid-run); poll briefly so the test asserts on settled state rather than a
+    # mid-write listing.
     n = _count(bucket, prefix)
     for _ in range(tries):
         if n == want:
