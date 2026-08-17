@@ -100,6 +100,19 @@ def _aws(*args: str, stdin: str | None = None) -> subprocess.CompletedProcess:
     )
 
 
+def _aws_retry(*args: str, stdin: str | None = None, tries: int = 6) -> bool:
+    """Run an aws s3 command, retrying transient SeaweedFS hiccups. Local SeaweedFS
+    under sustained suite load intermittently returns InternalError / needs a moment
+    after a bucket is created before it accepts writes; a bounded retry keeps E-07
+    deterministic without masking a real failure (the last rc is asserted by caller)."""
+    for i in range(tries):
+        r = _aws(*args, stdin=stdin)
+        if r.returncode == 0:
+            return True
+        time.sleep(1 + i)
+    return False
+
+
 def _docker_ok() -> bool:
     try:
         return (
@@ -144,7 +157,10 @@ def env():
         pytest.skip("Docker/aws not available")
     if _psql("postgres", "SELECT 1", tuples=True).returncode != 0:
         pytest.skip("host PostgreSQL not reachable")
-    if _aws("ls").returncode != 0:
+    # Retry the reachability probe: under full-suite load SeaweedFS can hiccup for a
+    # beat, and a one-shot check would turn that into a SPURIOUS skip (a skip blocks
+    # approval, §1.17.8). Only skip if S3 is durably unreachable.
+    if not _aws_retry("ls"):
         pytest.skip("host SeaweedFS/S3 not reachable")
 
     bucket = f"ol-test-{rid}"
@@ -273,15 +289,9 @@ print("built")
     assert r.stdout.strip().endswith(
         "built"
     ), f"demo build failed: {r.stdout} {r.stderr}"
-    assert (
-        _aws(
-            "cp",
-            "-",
-            f"s3://{env['bucket']}/warehouse/{TBL}/_delta_log/0.json",
-            stdin="x",
-        ).returncode
-        == 0
-    )
+    assert _aws_retry(
+        "cp", "-", f"s3://{env['bucket']}/warehouse/{TBL}/_delta_log/0.json", stdin="x"
+    ), "demo warehouse object write failed after retries"
 
 
 def _warehouse_objects(env) -> int:
@@ -296,7 +306,13 @@ def _seed_baseline(env) -> None:
             _psql("postgres", f'CREATE DATABASE "{db}" OWNER "{PG_USER}"').returncode
             == 0
         )
+    # mb then confirm the bucket is writable (SeaweedFS accepts writes a beat after
+    # create under load) so the first demo build is not racing bucket readiness.
     _aws("mb", f"s3://{env['bucket']}")
+    assert _aws_retry(
+        "cp", "-", f"s3://{env['bucket']}/.ready", stdin="x"
+    ), "run-scoped bucket did not become writable"
+    _aws("rm", f"s3://{env['bucket']}/.ready")
 
 
 def _reset_all(env) -> subprocess.CompletedProcess:
