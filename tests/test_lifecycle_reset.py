@@ -464,9 +464,7 @@ class TestU63BackupPrintsRestoreCommand:
 def _classify(inventory: str) -> list[dict]:
     """Feed normalized inventory lines to doctor_classify (extracted from lakehouse)
     and parse the emitted DOCTOR tokens. No Docker: a pure code path (U-34)."""
-    body = re.search(
-        r"(^doctor_classify\(\) \{.*?^\})", TEXT, re.M | re.S
-    ).group(1)
+    body = re.search(r"(^doctor_classify\(\) \{.*?^\})", TEXT, re.M | re.S).group(1)
     script = f"{body}\ndoctor_classify"
     r = subprocess.run(
         ["bash", "-c", script],
@@ -492,17 +490,11 @@ class TestU34OrphanClassifier:
         return {r["class"] for r in rows}
 
     def test_delta_prefix_unregistered_is_recoverable(self):
-        rows = _classify(
-            "prefix type=delta registered=no name=s3://b/warehouse/d1\n"
-        )
-        assert rows == [
-            {"class": "recoverable-delta", "name": "s3://b/warehouse/d1"}
-        ]
+        rows = _classify("prefix type=delta registered=no name=s3://b/warehouse/d1\n")
+        assert rows == [{"class": "recoverable-delta", "name": "s3://b/warehouse/d1"}]
 
     def test_iceberg_prefix_unregistered_is_doubtful(self):
-        rows = _classify(
-            "prefix type=iceberg registered=no name=s3://b/warehouse/i1\n"
-        )
+        rows = _classify("prefix type=iceberg registered=no name=s3://b/warehouse/i1\n")
         assert self._classes(rows) == {"doubtful-iceberg"}
 
     def test_registered_prefix_is_not_flagged(self):
