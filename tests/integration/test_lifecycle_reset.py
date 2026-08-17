@@ -216,25 +216,37 @@ def _seed(env, *, rows: bool = True, objects: bool = True):
     _aws("mb", f"s3://ol-test-{rid}")
     if objects:
         for key in ("warehouse/t/data.parquet", "mlflow-artifacts/1/a.txt"):
-            subprocess.run(
-                [
-                    "aws",
-                    "--endpoint-url",
-                    S3_ENDPOINT_HOST,
-                    "s3",
-                    "cp",
-                    "-",
-                    f"s3://ol-test-{rid}/{key}",
-                ],
-                input="seed",
-                text=True,
-                capture_output=True,
-                env={
-                    **os.environ,
-                    "AWS_ACCESS_KEY_ID": S3_KEY,
-                    "AWS_SECRET_ACCESS_KEY": S3_SECRET,
-                },
-            )
+            _seed_put(f"ol-test-{rid}/{key}")
+
+
+def _seed_put(dest: str, tries: int = 6) -> None:
+    # Bounded retry: SeaweedFS intermittently returns InternalError under sustained
+    # suite load / just after bucket create. Keeps seeding deterministic.
+    last = None
+    for i in range(tries):
+        last = subprocess.run(
+            [
+                "aws",
+                "--endpoint-url",
+                S3_ENDPOINT_HOST,
+                "s3",
+                "cp",
+                "-",
+                f"s3://{dest}",
+            ],
+            input="seed",
+            text=True,
+            capture_output=True,
+            env={
+                **os.environ,
+                "AWS_ACCESS_KEY_ID": S3_KEY,
+                "AWS_SECRET_ACCESS_KEY": S3_SECRET,
+            },
+        )
+        if last.returncode == 0:
+            return
+        time.sleep(1 + i)
+    raise AssertionError(f"seeding {dest} failed after {tries} tries: {last.stderr}")
 
 
 def _count_objects(env, prefix: str) -> int:

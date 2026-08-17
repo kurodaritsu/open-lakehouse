@@ -98,26 +98,34 @@ def _aws(*args: str, stdin: str | None = None) -> subprocess.CompletedProcess:
     )
 
 
-def _put(bucket: str, key: str, body: str = "x") -> None:
-    subprocess.run(
-        [
-            "aws",
-            "--endpoint-url",
-            S3_ENDPOINT_HOST,
-            "s3",
-            "cp",
-            "-",
-            f"s3://{bucket}/{key}",
-        ],
-        input=body,
-        text=True,
-        capture_output=True,
-        env={
-            **os.environ,
-            "AWS_ACCESS_KEY_ID": S3_KEY,
-            "AWS_SECRET_ACCESS_KEY": S3_SECRET,
-        },
-    )
+def _put(bucket: str, key: str, body: str = "x", tries: int = 6) -> None:
+    # Bounded retry: local SeaweedFS intermittently returns InternalError under
+    # sustained suite load; without this a transient hiccup fails class manufacture.
+    last = None
+    for i in range(tries):
+        last = subprocess.run(
+            [
+                "aws",
+                "--endpoint-url",
+                S3_ENDPOINT_HOST,
+                "s3",
+                "cp",
+                "-",
+                f"s3://{bucket}/{key}",
+            ],
+            input=body,
+            text=True,
+            capture_output=True,
+            env={
+                **os.environ,
+                "AWS_ACCESS_KEY_ID": S3_KEY,
+                "AWS_SECRET_ACCESS_KEY": S3_SECRET,
+            },
+        )
+        if last.returncode == 0:
+            return
+        time.sleep(1 + i)
+    raise AssertionError(f"seeding {key} failed after {tries} tries: {last.stderr}")
 
 
 def _which(x: str) -> bool:

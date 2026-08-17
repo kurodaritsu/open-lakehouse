@@ -50,9 +50,17 @@ def _aws(*args: str, stdin: str | None = None) -> subprocess.CompletedProcess:
     )
 
 
-def _put(bucket: str, key: str) -> None:
-    r = _aws("cp", "-", f"s3://{bucket}/{key}", stdin="x")
-    assert r.returncode == 0, f"seeding {key} failed: {r.stderr}"
+def _put(bucket: str, key: str, tries: int = 6) -> None:
+    # Local SeaweedFS intermittently returns InternalError under sustained suite load
+    # (and just after a bucket is created). Bounded retry keeps seeding deterministic
+    # without masking a durable failure.
+    last = None
+    for i in range(tries):
+        last = _aws("cp", "-", f"s3://{bucket}/{key}", stdin="x")
+        if last.returncode == 0:
+            return
+        time.sleep(1 + i)
+    raise AssertionError(f"seeding {key} failed after {tries} tries: {last.stderr}")
 
 
 def _count(bucket: str, prefix: str) -> int:
