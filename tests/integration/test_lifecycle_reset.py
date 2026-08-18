@@ -952,3 +952,37 @@ def test_i53_restore_single_quiesced_window(env, tmp_path):
         subprocess.run(["docker", "rm", "-f", writer], capture_output=True)
         _rmtree(backup_dir)
         _rmtree(REPO_ROOT / "backups")
+
+
+# --- REVIEW-HANDOFF #2: production restore validates MANIFEST targets --------------
+
+
+def test_review2_restore_refuses_foreign_manifest(env, tmp_path):
+    # A MANIFEST naming targets that are NOT this run's (here the PRODUCTION bucket +
+    # real DB names) must be refused BEFORE any service is touched, without --force.
+    # The overlay semantic gate passes (the current env is run-scoped); it is
+    # restore_validate_targets that must catch the mismatched artifact.
+    _seed(env)  # establishes the real, run-scoped targets for this run
+    art = tmp_path / "foreign"
+    (art / "pg").mkdir(parents=True)
+    (art / "s3").mkdir()
+    (art / "volumes").mkdir()
+    (art / "MANIFEST").write_text(
+        "lakehouse-backup\nversion=1\n"
+        "bucket=lakehouse\nuc_backend=h2\n"
+        "databases=mlflow airflow iceberg_catalog\nvolumes=\n"
+    )
+    marker = REPO_ROOT / ".lakehouse-restore-interrupted"
+    marker.unlink(missing_ok=True)
+    before = _count_objects(env, "")
+    r = _restore(env, art, "--yes")
+    try:
+        combined = r.stdout + r.stderr
+        assert r.returncode != 0, "restore must refuse a foreign MANIFEST"
+        assert "do not match the current stack" in combined
+        # Aborted before any mutation: run-scoped bucket unchanged, no marker written
+        # (nothing was quiesced or partially restored).
+        assert _count_objects(env, "") == before
+        assert not marker.exists(), "refusal happens before mutation — no marker"
+    finally:
+        marker.unlink(missing_ok=True)

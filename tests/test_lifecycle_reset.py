@@ -67,6 +67,23 @@ def _detect_uc_backend(props_path: str) -> str:
     ).stdout.strip()
 
 
+def _dbname_ok(name: str) -> bool:
+    """Return True iff pg_assert_valid_dbname (extracted from lakehouse) accepts name."""
+    body = re.search(
+        r"(^pg_assert_valid_dbname\(\) \{.*?^\})", TEXT, re.M | re.S
+    ).group(1)
+    script = f'RED=""; NC=""\n{body}\npg_assert_valid_dbname "$1"'
+    return (
+        subprocess.run(
+            ["bash", "-c", script, "_", name],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).returncode
+        == 0
+    )
+
+
 # --- U-46 ------------------------------------------------------------------------
 
 
@@ -121,6 +138,44 @@ class TestU46UCBackendDetection:
         )
 
 
+# --- REVIEW-HANDOFF #3: DB-name allowlist before SQL interpolation ---------------
+
+
+class TestReview3DbNameSanitization:
+    def test_legit_names_accepted(self):
+        for name in (
+            "mlflow",
+            "airflow",
+            "iceberg_catalog",
+            "ol_test_run1234_mlflow",
+            "iceberg-catalog",  # hyphen (finding-4 fix) stays legal
+            "unity.catalog",  # dot legal
+        ):
+            assert _dbname_ok(name), f"{name!r} should be accepted"
+
+    def test_injection_and_metachars_rejected(self):
+        for name in (
+            "",  # empty
+            "x'; DROP DATABASE prod; --",  # quote/semicolon breakout
+            'x" ; --',  # double-quote breakout
+            "a b",  # space
+            "db`whoami`",  # backtick
+            "db$(id)",  # command sub
+            "db;drop",  # semicolon
+            "db\\x",  # backslash
+        ):
+            assert not _dbname_ok(name), f"{name!r} must be rejected"
+
+    def test_drop_and_restore_guard_on_the_validator(self):
+        # Both SQL-interpolating helpers must call the validator first.
+        for fn in ("pg_drop_recreate", "pg_restore_db"):
+            body = _func_body(fn)
+            assert "pg_assert_valid_dbname" in body, f"{fn} must validate the db name"
+            assert body.index("pg_assert_valid_dbname") < (
+                body.index("datname=") if "datname=" in body else len(body)
+            ), f"{fn} must validate BEFORE interpolating the name into SQL"
+
+
 # --- U-52 ------------------------------------------------------------------------
 
 
@@ -163,6 +218,16 @@ class TestU30DryRunInert:
         dry_idx = body.index('dry_run" = true')
         exec_idx = body.index("reset_execute")
         assert dry_idx < exec_idx, "dry-run branch must precede reset_execute"
+
+    def test_plan_does_not_advertise_unimplemented_kafka_reset(self):
+        # REVIEW-HANDOFF #4: the engine quiesces Kafka but deletes no topics/
+        # checkpoints, so the plan must NOT claim a kafka reset (--dry-run must not
+        # lie). Deferred to a follow-up PR.
+        for mode in ("--data", "--all"):
+            rows = _plan(mode)
+            assert not any(
+                r["target"] == "kafka" for r in rows
+            ), f"{mode} plan must not advertise an unimplemented kafka reset"
 
 
 # --- U-47 ------------------------------------------------------------------------
@@ -378,6 +443,48 @@ class TestU66bGateWiredIntoReset:
         assert body.index("reset_semantic_gate") < body.index(
             "reset_do_deletions"
         ), "the semantic gate must run before any deletion"
+
+    def test_backup_calls_gate_before_snapshot(self):
+        # REVIEW-HANDOFF #1: backup quiesces containers and snapshots the effective
+        # bucket/DBs; under an overlay with LAKEHOUSE_ENV_FILE unset those could
+        # resolve to production names. cmd_backup must run the gate before it
+        # quiesces or snapshots anything.
+        body = _func_body("cmd_backup")
+        assert "reset_semantic_gate" in body, "cmd_backup must run the semantic gate"
+        assert body.index("reset_semantic_gate") < body.index(
+            "backup_quiesce_writers"
+        ), "the gate must run before backup quiesces/snapshots"
+
+    def test_restore_calls_gate_before_mutation(self):
+        # Companion assertion: restore already gates; keep it guarded so the trio
+        # (reset/backup/restore) stay symmetric.
+        body = _func_body("cmd_restore")
+        assert "reset_semantic_gate" in body
+        assert body.index("reset_semantic_gate") < body.index(
+            "backup_quiesce_writers"
+        ), "the gate must run before restore quiesces/mutates"
+
+    def test_restore_validates_manifest_targets_before_mutation(self):
+        # REVIEW-HANDOFF #2: production restore must verify the MANIFEST's targets
+        # belong to this stack before touching services, so a swapped artifact can't
+        # drive pg_restore/s3 sync --delete at arbitrary names.
+        body = _func_body("cmd_restore")
+        assert (
+            "restore_validate_targets" in body
+        ), "restore must validate MANIFEST targets"
+        assert body.index("restore_validate_targets") < body.index(
+            "backup_quiesce_writers"
+        ), "MANIFEST target validation must run before any service is touched"
+
+    def test_restore_validator_compares_against_effective_helpers(self):
+        # The validator derives expected targets from the same effective helpers the
+        # engine uses, so it enforces run-scoping under an overlay AND stack-identity
+        # in production.
+        body = _func_body("restore_validate_targets")
+        assert "reset_effective_bucket" in body
+        assert "reset_effective_db" in body
+        assert "reset_effective_volume" in body
+        assert '"$force"' in body or "force" in body
 
     def test_good_targets_pass(self):
         assert _run_gate(self.GOOD) == 0

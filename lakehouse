@@ -1542,7 +1542,10 @@ reset_emit_plan() {
         echo "PLAN target=rows name=uc-table-registrations action=clear"
         echo "PLAN target=rows name=mlflow-run-records action=clear"
         echo "PLAN target=rows name=iceberg_catalog-rows action=clear"
-        echo "PLAN target=kafka name=topics+checkpoints action=reset"
+        # NOTE: Kafka topic/checkpoint reset is NOT emitted — it is not implemented in
+        # PR #0 (the engine quiesces Kafka but deletes no topics/checkpoints), so
+        # advertising it in the plan would make --dry-run lie (review-handoff #4).
+        # Deferred to a follow-up PR; the §1.13.4 matrix row is a future target.
     fi
 
     local v vmode
@@ -1606,10 +1609,26 @@ aws_s3() {
     fi
 }
 
+# Reject a database name that isn't a safe identifier before it is interpolated into
+# any SQL (review-handoff #3). Names originate from the JDBC-URL parse, MLFLOW_PG_DB,
+# and (historically) the MANIFEST — none fully trusted. Allow only [A-Za-z0-9_.-]
+# (the set legal for our DB names, matching detect_uc_backend's parse), so a value
+# containing a quote/semicolon/space cannot break out of the datname='...' literal or
+# the "..." identifier.
+pg_assert_valid_dbname() {
+    case "$1" in
+        "" | *[!a-zA-Z0-9_.-]*)
+            echo -e "  ${RED}!${NC} refusing unsafe database name: '$1'" >&2
+            return 1 ;;
+    esac
+    return 0
+}
+
 # Safe DROP sequence (T-1.5.4): capture owner -> terminate live backends -> DROP ->
 # CREATE with the original owner. Survives open connections to the target DB.
 pg_drop_recreate() {
     local db="$1" owner
+    pg_assert_valid_dbname "$db" || return 1
     owner=$(pg_psql -d postgres -tAc \
         "SELECT pg_catalog.pg_get_userbyid(datdba) FROM pg_database WHERE datname='${db}'" \
         2>/dev/null | tr -d '[:space:]' || true)
@@ -1762,12 +1781,22 @@ reset_delete_data() {
 
     if [ "$mode" = "data" ]; then
         # DBs survive in --data, so clear the dangling rows (plan 1.14.1, 1.18.4) —
-        # otherwise --data would manufacture the orphans I-32 forbids. Best-effort:
-        # these rows are advisory (doctor also reports them) and their cleanup must
-        # not block the object-store reset that already succeeded above.
-        reset_clear_uc_registrations || true
-        reset_clear_mlflow_runs || true
-        reset_clear_iceberg_rows || true
+        # otherwise --data would manufacture the orphans I-32 forbids. Attempt ALL
+        # three (clear as much as possible), then FAIL-STOP if any genuinely failed
+        # (review-handoff #5): the object store is already emptied, so leaving stale
+        # catalog/tracking rows is exactly the orphaned state --data promises to
+        # avoid. reset_execute then writes a marker + leaves services stopped; the
+        # operator reconciles with `doctor` rather than trusting a false "complete".
+        # (Each helper returns 0 when its table/UC is simply absent — a clean/empty
+        # stack does not trip this.)
+        local clr_rc=0
+        reset_clear_uc_registrations || clr_rc=1
+        reset_clear_mlflow_runs || clr_rc=1
+        reset_clear_iceberg_rows || clr_rc=1
+        if [ "$clr_rc" -ne 0 ]; then
+            echo -e "  ${RED}!${NC} dangling-row cleanup incomplete — object store emptied but catalog/tracking rows remain; run './lakehouse doctor'" >&2
+            return 1
+        fi
     fi
 
     # Data-plane named volumes (spark-data, spark-logs).
@@ -1832,7 +1861,12 @@ for cat in pages("/catalogs", "catalogs"):
             req("DELETE", f"/tables/{c}.{s}.{name}")
 PY
     if [ "$rc" -ne 0 ]; then
-        echo -e "  ${YELLOW}!${NC} UC registration clear may be incomplete" >&2
+        # Propagate a genuine failure (netns/image/UC unreachable) so --data can
+        # fail-stop rather than report success with tables still registered
+        # (review-handoff #5). A not-running UC returned 0 earlier; per-table DELETE
+        # errors are retried/observed by the caller's post-state, not swallowed here.
+        echo -e "  ${YELLOW}!${NC} UC registration clear failed (may be incomplete)" >&2
+        return "$rc"
     fi
     return 0
 }
@@ -2046,6 +2080,7 @@ pg_dump_db() {
 # quiesced; this clears any stray session).
 pg_restore_db() {
     local db="$1" dir="$2" host="${POSTGRES_HOST:-localhost}"
+    pg_assert_valid_dbname "$db" || return 1
     pg_psql -d postgres -c \
         "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${db}' AND pid <> pg_backend_pid();" \
         >/dev/null 2>&1 || true
@@ -2217,6 +2252,14 @@ cmd_backup() {
     done
     header "BACKUP"
 
+    # Overlay safety (same gate reset/restore run): backup quiesces containers and
+    # snapshots the effective bucket/DBs. LAKEHOUSE_ENV_FILE is OPTIONAL under an
+    # overlay (plan 1.16.1), so if it is unset the production .env is sourced and
+    # S3_BUCKET / MLFLOW_PG_DB could resolve to PRODUCTION names — backup would then
+    # quiesce test containers while snapshotting the real PG/S3. Abort unless every
+    # effective target is run-scoped. Overlay-inactive: unrestricted (returns 0).
+    reset_semantic_gate || return 1
+
     if [ -z "$out" ]; then
         local tag="" ts
         ts=$(date -u +%Y%m%dT%H%M%SZ)
@@ -2258,6 +2301,45 @@ EOF
     return 0
 }
 
+# Reject a restore whose MANIFEST targets don't match the CURRENT stack's effective
+# targets, unless --force (review-handoff #2). Without this, the overlay-inactive
+# (production) path applied whatever databases/bucket/volumes the MANIFEST named,
+# letting a crafted or mistakenly-swapped artifact drive `pg_restore --create --clean`
+# and `s3 sync --delete` at arbitrary names reachable with local creds. Matching the
+# effective helpers also enforces run-scoping under an overlay (they yield run-scoped
+# names there), so this subsumes the previous overlay-only MANIFEST check.
+restore_validate_targets() {
+    local dir="$1" force="$2"
+    local m_bucket m_dbs m_vols
+    m_bucket=$(grep '^bucket=' "${dir}/MANIFEST" | cut -d= -f2-)
+    m_dbs=$(grep '^databases=' "${dir}/MANIFEST" | cut -d= -f2-)
+    m_vols=$(grep '^volumes=' "${dir}/MANIFEST" | cut -d= -f2-)
+
+    local exp_bucket exp_dbs="" exp_vols="" db v uc
+    exp_bucket=$(reset_effective_bucket)
+    for db in airflow iceberg_catalog mlflow; do exp_dbs="${exp_dbs} $(reset_effective_db "$db")"; done
+    uc=$(detect_uc_backend)
+    [ "${uc%%:*}" = postgresql ] && exp_dbs="${exp_dbs} $(reset_effective_db "${uc#postgresql:}")"
+    for v in $(reset_discover_volumes); do exp_vols="${exp_vols} $(reset_effective_volume "$v")"; done
+
+    local mismatch=""
+    [ "$m_bucket" = "$exp_bucket" ] || mismatch="${mismatch} bucket(manifest='${m_bucket}',expected='${exp_bucket}')"
+    for db in $m_dbs; do
+        case " $exp_dbs " in *" $db "*) ;; *) mismatch="${mismatch} db('${db}')" ;; esac
+    done
+    for v in $m_vols; do
+        case " $exp_vols " in *" $v "*) ;; *) mismatch="${mismatch} volume('${v}')" ;; esac
+    done
+
+    [ -z "$mismatch" ] && return 0
+    if [ "$force" = true ]; then
+        echo -e "  ${YELLOW}!${NC} restore: MANIFEST targets differ from the current stack; proceeding (--force):${mismatch}" >&2
+        return 0
+    fi
+    echo -e "${RED}restore: MANIFEST targets do not match the current stack — refusing.${NC} Use --force to override. Offending:${mismatch}" >&2
+    return 1
+}
+
 # Apply a backup from <dir> (fail-stop, no restart). ASSUMES a quiesced window.
 # Recreates databases (owner/grants from the dump), syncs S3 with --delete, restores
 # volumes, and reinstates UC's H2. Under an active overlay, refuses any backup whose
@@ -2273,14 +2355,6 @@ restore_apply() {
     dbs=$(grep '^databases=' "${dir}/MANIFEST" | cut -d= -f2-)
     vols=$(grep '^volumes=' "${dir}/MANIFEST" | cut -d= -f2-)
     ucb=$(grep '^uc_backend=' "${dir}/MANIFEST" | cut -d= -f2-)
-
-    if [ "${OVERLAY_ACTIVE:-false}" = true ]; then
-        if ! overlay_validate_targets --runid "$LAKEHOUSE_TEST_RUN_ID" --active true \
-             --databases "$dbs" --buckets "$bucket" --volumes "$vols"; then
-            echo -e "${RED}restore: backup targets are not scoped to run-id '${LAKEHOUSE_TEST_RUN_ID}' — refusing${NC}" >&2
-            return 1
-        fi
-    fi
 
     local db v
     for db in $dbs; do
@@ -2304,17 +2378,18 @@ restore_apply() {
     return 0
 }
 
-# ./lakehouse restore --from <path> [--yes]
+# ./lakehouse restore --from <path> [--yes] [--force]
 # FAIL-STOP and RECOVERABLE, not atomic (plan 1.15.4). Inside a SINGLE quiesced
 # window (plan 1.16.9): quiesce -> pre-restore snapshot (same snapshot path, no
 # restart) -> mutate. On failure: leave services stopped, preserve a marker, print
 # the rollback command. On success: clear the marker and restart the prior set.
 cmd_restore() {
-    local from="" assume_yes=false
+    local from="" assume_yes=false force=false
     while [ $# -gt 0 ]; do
         case "$1" in
             --from)    [ $# -ge 2 ] || { echo "restore: --from requires a value" >&2; return 2; }; from="$2"; shift 2 ;;
             --yes|-y)  assume_yes=true; shift ;;
+            --force)   force=true; shift ;;
             *) echo "restore: unknown argument '$1'" >&2; return 2 ;;
         esac
     done
@@ -2342,6 +2417,10 @@ cmd_restore() {
     fi
 
     reset_semantic_gate || return 1
+
+    # Reject a MANIFEST whose targets are not this stack's (review-handoff #2) BEFORE
+    # touching any service; --force overrides.
+    restore_validate_targets "$from" "$force" || return 1
 
     backup_quiesce_writers
 
@@ -2691,7 +2770,8 @@ Commands:
   reset <mode>        Reset environment: --data | --metadata | --all
                         [--keep-mlflow] [--dry-run] [--yes]
   backup [--out <d>]  Back up all databases + object store + volumes + UC state
-  restore --from <p>  Restore from a backup artifact (fail-stop; --yes to skip prompt)
+  restore --from <p>  Restore from a backup artifact (fail-stop; --yes to skip prompt,
+                        --force to restore a MANIFEST whose targets differ from this stack)
   doctor              Report orphaned data / catalog inconsistencies
   help                Show this help
 
