@@ -235,15 +235,24 @@ class TestFailClosedGuard:
         import tempfile
 
         for forbidden in (
-            "/tmp/seaweedfs",
+            "/tmp/seaweedfs",  # inside $TMPDIR on Linux, but NOT run-scoped
             "./data",
             str(REPO_ROOT),
             os.path.expanduser("~"),
         ):
             with pytest.raises(isolation.IsolationError):
                 isolation.assert_temp_path(forbidden)
+        # A bare temp dir is inside $TMPDIR but not run-scoped -> still refused.
         with tempfile.TemporaryDirectory() as d:
-            assert isolation.assert_temp_path(d) == d
+            with pytest.raises(isolation.IsolationError):
+                isolation.assert_temp_path(d)
+        # Only a run-scoped dir inside $TMPDIR is permitted.
+        scoped = os.path.join(tempfile.gettempdir(), f"ol-test-{RUNID}_scratch")
+        os.makedirs(scoped, exist_ok=True)
+        try:
+            assert isolation.assert_temp_path(scoped) == scoped
+        finally:
+            os.rmdir(scoped)
 
     def test_u61_guard_binds_to_current_run_id(self):
         # A resource matching the ol_test_/ol-test- family but a DIFFERENT run-id

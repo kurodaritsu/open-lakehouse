@@ -141,16 +141,30 @@ def assert_test_container(name: str) -> str:
 
 
 def assert_temp_path(path: str) -> str:
-    """Permit an ``rm -rf`` target only if it resolves inside the temp dir.
+    """Permit an ``rm -rf`` target only if it is a run-scoped dir inside the temp dir.
 
     No destructive test may ever remove a path outside ``$TMPDIR`` — in particular
     never ``/tmp/seaweedfs``, ``./data``, or a home directory (§1.13.1, U-45).
+
+    "Inside ``$TMPDIR``" is necessary but *not sufficient*: on Linux ``$TMPDIR`` is the
+    shared ``/tmp``, where real data such as ``/tmp/seaweedfs`` also lives, so the target
+    must additionally be scoped to the current run-id — exactly like every other guard in
+    this module. (On macOS ``$TMPDIR`` is a private ``/var/folders/...`` dir, which hid
+    this gap: ``/tmp/seaweedfs`` fell outside it by accident of platform, not by design.)
     """
+    rid = require_run_id()
     real = os.path.realpath(path)
     tmp = os.path.realpath(tempfile.gettempdir())
     if real != tmp and not real.startswith(tmp + os.sep):
         raise IsolationError(
             f"refusing rm -rf {path!r} (resolves to {real!r}): outside the temp dir "
             f"{tmp!r}"
+        )
+    scoped = re.compile(rf"ol[_-]test[_-]{re.escape(rid)}([_-].*)?")
+    if not any(scoped.fullmatch(c) for c in real.split(os.sep)):
+        raise IsolationError(
+            f"refusing rm -rf {path!r} (resolves to {real!r}): inside {tmp!r} but not "
+            f"scoped to the current run-id {rid!r} (expected a path component like "
+            f"ol-test-{rid})"
         )
     return path
