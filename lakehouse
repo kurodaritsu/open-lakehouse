@@ -1787,7 +1787,8 @@ reset_delete_metadata() {
 
 # Data plane: empty the object-store prefixes, clear the catalog/tracking ROWS that
 # referenced them (only when the owning DB is NOT being dropped — i.e. --data, not
-# --all, which drops those DBs wholesale), reset Kafka, and remove data volumes.
+# --all, which drops those DBs wholesale), and remove data volumes. Kafka
+# topics/checkpoints are NOT wiped in PR #0 (deferred) — the dry-run plan reflects that.
 reset_delete_data() {
     local mode="$1"
     local bucket
@@ -2398,8 +2399,9 @@ restore_validate_targets() {
 
 # Apply a backup from <dir> (fail-stop, no restart). ASSUMES a quiesced window.
 # Recreates databases (owner/grants from the dump), syncs S3 with --delete, restores
-# volumes, and reinstates UC's H2. Under an active overlay, refuses any backup whose
-# recorded targets are not run-scoped (defense in depth beyond reset_semantic_gate).
+# volumes, and reinstates UC's H2. Target-safety is enforced earlier by
+# restore_validate_targets (MANIFEST must match the current stack's effective targets,
+# which also yields run-scoping under an overlay); this function assumes that passed.
 restore_apply() {
     local dir="$1"
     if [ ! -f "${dir}/MANIFEST" ]; then
