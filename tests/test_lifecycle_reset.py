@@ -176,6 +176,51 @@ class TestReview3DbNameSanitization:
             ), f"{fn} must validate BEFORE interpolating the name into SQL"
 
 
+# --- REVIEW-HANDOFF #7 & #8: quiesce verification + S3-delete post-condition ------
+
+
+class TestReviewLowQuiesceAndS3:
+    def test_reset_stop_services_verifies_containers_down(self):
+        # #7: after stopping, it must confirm the containers are actually not running.
+        body = _func_body("reset_stop_services")
+        assert "is_container_running" in body
+        assert "cmd_stop" in body
+        assert body.index("cmd_stop") < body.index(
+            "is_container_running"
+        ), "must stop THEN verify"
+
+    def test_reset_execute_aborts_before_deletion_on_quiesce_failure(self):
+        # #7: an incomplete quiesce must abort BEFORE any deletion.
+        body = _func_body("reset_execute")
+        q = body.index("reset_quiesce")
+        d = body.index("reset_do_deletions")
+        assert "if ! reset_quiesce" in body, "quiesce failure must be checked"
+        assert q < d, "quiesce check precedes deletions"
+
+    def test_backup_and_restore_abort_on_incomplete_quiesce(self):
+        # #7: backup/restore must not snapshot/mutate if a writer stayed up.
+        for fn in ("cmd_backup", "cmd_restore"):
+            body = _func_body(fn)
+            assert (
+                "if ! backup_quiesce_writers" in body
+            ), f"{fn} must abort on incomplete quiesce"
+
+    def test_backup_quiesce_writers_reports_failure(self):
+        body = _func_body("backup_quiesce_writers")
+        # stops, then re-checks is_container_running and returns rc.
+        assert body.count("is_container_running") >= 2, "must verify post-stop"
+        assert 'return "$rc"' in body
+
+    def test_data_delete_has_s3_empty_post_condition(self):
+        # #8: after rm, verify the prefixes are actually empty (permission errors that
+        # leave objects must fail-stop, not silently succeed).
+        body = _func_body("reset_delete_data")
+        assert "remain" in body, "must re-check object count after delete"
+        assert body.index("aws_s3 rm") < body.index(
+            "remain"
+        ), "post-condition runs after the delete"
+
+
 # --- U-52 ------------------------------------------------------------------------
 
 

@@ -628,22 +628,38 @@ def _uc_wait(env, tries: int = 40) -> bool:
     return False
 
 
-def _uc_boot(env) -> bool:
-    subprocess.run(["docker", "rm", "-f", _uc_name(env)], capture_output=True)
-    subprocess.run(
+def _uc_compose(env, *args) -> subprocess.CompletedProcess:
+    base = REPO_ROOT / "docker-compose-unity-catalog.yml"
+    overlay = OVERLAY_DIR / "docker-compose-unity-catalog.test.yml"
+    return subprocess.run(
         [
             "docker",
-            "run",
-            "-d",
-            "--name",
-            _uc_name(env),
-            "-e",
-            "JAVA_OPTS=-Xmx1g",
-            UC_IMAGE,
+            "compose",
+            "--env-file",
+            env["overlay"]["LAKEHOUSE_ENV_FILE"],
+            "-f",
+            str(base),
+            "-f",
+            str(overlay),
+            *args,
         ],
+        cwd=REPO_ROOT,
+        env=env["overlay"],
         capture_output=True,
-        check=True,
+        text=True,
+        timeout=120,
     )
+
+
+def _uc_boot(env) -> bool:
+    # Boot UC via the OVERLAY COMPOSE (as ./lakehouse start does), NOT a bare
+    # `docker run`: reset/backup quiesce Unity Catalog with `docker compose down`,
+    # which can only stop a compose-managed container. A docker-run container would
+    # survive the quiesce (so reset would refuse — review-handoff #7 — and UC's H2
+    # would never actually reset). Matches E-07.
+    subprocess.run(["docker", "rm", "-f", _uc_name(env)], capture_output=True)
+    if _uc_compose(env, "up", "-d").returncode != 0:
+        return False
     return _uc_wait(env)
 
 
@@ -741,6 +757,8 @@ def test_i29_round_trip_covers_everything(env):
         # UC tables (the headline of I-29).
         assert _uc_tables(env) == ["t1"], "UC table restored via H2 docker-cp"
     finally:
+        # UC is compose-managed; bring it down, then force-remove as a backstop.
+        _uc_compose(env, "down", "-v")
         subprocess.run(["docker", "rm", "-f", _uc_name(env)], capture_output=True)
         # reset restarts UC via `docker compose up`, which materialises the
         # run-scoped never-destroy volumes (uc-logs, ...); sweep every run-scoped

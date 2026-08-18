@@ -1444,10 +1444,13 @@ reset_db_targets() {
     return 0
 }
 
-# Effective (overlay-aware) target NAMES. Under an active overlay every target is
-# run-scoped (and re-checked by the semantic gate, plan 1.18.2); otherwise these are
-# the real configured names. Deriving from the run-id under overlay means production
-# .env values cannot leak in.
+# Effective (overlay-aware) target NAMES. Under an active overlay these default to
+# run-scoped names, but an explicit S3_BUCKET / MLFLOW_PG_DB in the environment STILL
+# takes precedence (`${S3_BUCKET:-ol-test-…}`), so a production value CAN influence
+# them if LAKEHOUSE_ENV_FILE is unset and the real .env is sourced. Safety therefore
+# does NOT rest on these helpers alone: the semantic gate (plan 1.18.2), now wired
+# into reset, backup, AND restore, re-derives these and ABORTS unless every target is
+# run-scoped. Overlay-inactive, these are the real configured names (unrestricted).
 reset_effective_bucket() {
     if [ "${OVERLAY_ACTIVE:-false}" = "true" ]; then
         echo "${S3_BUCKET:-ol-test-${LAKEHOUSE_TEST_RUN_ID}}"
@@ -1684,25 +1687,49 @@ reset_running_services() {
     return 0
 }
 
+# Resolved container names a service key owns — used to VERIFY quiescence actually
+# took effect (review-handoff #7), so destructive work never proceeds against a
+# writer that failed to stop.
+quiesce_containers_for() {
+    case "$1" in
+        spark)         echo "$(resolve_container_name spark-master-41) $(resolve_container_name spark-worker-41) $(resolve_container_name spark-connect-41)" ;;
+        kafka)         echo "$(resolve_container_name kafka) $(resolve_container_name zookeeper)" ;;
+        unity-catalog) resolve_container_name unity-catalog ;;
+        mlflow)        resolve_container_name mlflow ;;
+        airflow)       echo "$(resolve_container_name airflow-webserver) $(resolve_container_name airflow-scheduler) $(resolve_container_name airflow-triggerer)" ;;
+    esac
+}
+
+# Stop each service and CONFIRM its containers are actually down. Returns non-zero if
+# any remain running, so the caller can abort before touching data (a stop that
+# silently failed must not let a live writer race the deletion — review-handoff #7).
 reset_stop_services() {
-    local s
+    local s c rc=0
     for s in "$@"; do
         echo -e "${YELLOW}Quiescing ${s}...${NC}"
         cmd_stop "$s" >/dev/null 2>&1 || true
+        for c in $(quiesce_containers_for "$s"); do
+            if is_container_running "$c"; then
+                echo -e "  ${RED}!${NC} ${c} still running after quiesce" >&2
+                rc=1
+            fi
+        done
     done
-    return 0
+    return "$rc"
 }
 
 # Quiesce the services that WRITE to a mode's targets (plan 1.15.3). --data keeps
 # Unity Catalog UP (its registrations are cleared via REST); --metadata stops the
 # DB clients; --all stops everything.
+# Returns non-zero if any writer for the mode failed to stop (propagated from
+# reset_stop_services). --data intentionally keeps Unity Catalog UP (its
+# registrations are cleared via REST), so UC is not in the --data set.
 reset_quiesce() {
     case "$1" in
         data)     reset_stop_services spark kafka mlflow airflow ;;
         metadata) reset_stop_services unity-catalog mlflow airflow ;;
         all)      reset_stop_services spark kafka unity-catalog mlflow airflow ;;
     esac
-    return 0
 }
 
 # Restore the previously-running set — ONLY on success (plan 1.16.5 / 1.19.3).
@@ -1778,6 +1805,17 @@ reset_delete_data() {
     fi
     aws_s3 rm "s3://${bucket}/warehouse/" --recursive >/dev/null 2>&1 || true
     aws_s3 rm "s3://${bucket}/mlflow-artifacts/" --recursive >/dev/null 2>&1 || true
+    # Post-condition (review-handoff #8): the prefixes must actually be EMPTY. A
+    # permission error (AccessDenied) makes `rm` fail while objects remain, which the
+    # `|| true` above would otherwise mask into a false success. A missing bucket
+    # lists empty (benign). Fail-stop if anything survived the delete.
+    local remain
+    remain=$(aws_s3 ls "s3://${bucket}/warehouse/" --recursive 2>/dev/null | grep -c . || true)
+    remain=$((remain + $(aws_s3 ls "s3://${bucket}/mlflow-artifacts/" --recursive 2>/dev/null | grep -c . || true)))
+    if [ "$remain" -ne 0 ]; then
+        echo -e "  ${RED}!${NC} object store not empty after delete (${remain} object(s) remain) — check S3 permissions" >&2
+        return 1
+    fi
 
     if [ "$mode" = "data" ]; then
         # DBs survive in --data, so clear the dangling rows (plan 1.14.1, 1.18.4) —
@@ -1924,7 +1962,14 @@ reset_execute() {
 
     local running
     running=$(reset_running_services)
-    reset_quiesce "$mode"
+    # Quiesce and CONFIRM writers stopped BEFORE any deletion (review-handoff #7).
+    # If quiescence is incomplete, nothing has been deleted yet — restart the prior
+    # set and abort cleanly (no marker: state is unchanged).
+    if ! reset_quiesce "$mode"; then
+        reset_restore_services "$running"
+        echo -e "${RED}reset: could not quiesce all writers — aborting before any deletion.${NC} Nothing was changed." >&2
+        return 1
+    fi
 
     if ! reset_do_deletions "$mode" "$keep_mlflow"; then
         reset_write_marker "$mode"
@@ -2034,15 +2079,22 @@ backup_writer_containers() {
 # (`while read` under process substitution runs in THIS shell, so the array persists.)
 backup_quiesce_writers() {
     QUIESCED_WRITERS=()
-    local c
+    local c rc=0
     while read -r c; do
         if is_container_running "$c"; then
             QUIESCED_WRITERS+=("$c")
             echo -e "${YELLOW}Quiescing ${c}...${NC}"
             docker stop "$c" >/dev/null 2>&1 || true
+            # Confirm it actually stopped — a snapshot/mutation must not proceed while
+            # a writer is still live (review-handoff #7). Still recorded in
+            # QUIESCED_WRITERS so the caller restarts it on abort.
+            if is_container_running "$c"; then
+                echo -e "  ${RED}!${NC} ${c} still running after quiesce" >&2
+                rc=1
+            fi
         fi
     done < <(backup_writer_containers)
-    return 0
+    return "$rc"
 }
 
 # Restart the writers recorded by backup_quiesce_writers (docker start — layers intact).
@@ -2268,7 +2320,11 @@ cmd_backup() {
     fi
     mkdir -p "$out"
 
-    backup_quiesce_writers
+    if ! backup_quiesce_writers; then
+        backup_unquiesce_writers
+        echo -e "${RED}Backup aborted:${NC} could not quiesce all writers — refusing to take a torn snapshot." >&2
+        return 1
+    fi
     local rc=0
     backup_take_snapshot "$out" || rc=$?
     backup_unquiesce_writers  # always — backup is non-mutating
@@ -2422,7 +2478,11 @@ cmd_restore() {
     # touching any service; --force overrides.
     restore_validate_targets "$from" "$force" || return 1
 
-    backup_quiesce_writers
+    if ! backup_quiesce_writers; then
+        backup_unquiesce_writers
+        echo -e "${RED}Restore aborted:${NC} could not quiesce all writers — refusing to mutate with a live writer." >&2
+        return 1
+    fi
 
     local ts snap
     ts=$(date -u +%Y%m%dT%H%M%SZ)
