@@ -1375,7 +1375,9 @@ detect_uc_backend() {
                 */*) db="${url##*/}" ;;  # standard form jdbc:postgresql://host:port/<db>
                 *)   db="${url##*:}" ;;  # slash-less form jdbc:postgresql:<db>
             esac
-            db="${db%%[!a-zA-Z0-9_]*}" # trim any trailing whitespace/comment
+            db="${db%%\?*}"            # drop any ?jdbcParams suffix
+            db="${db%%[[:space:]]*}"   # drop trailing whitespace/comment
+            # NB: keep '-' and '.' — they are legal in a PostgreSQL database name.
             if [ -n "$db" ]; then
                 echo "postgresql:${db}"
                 return 0
@@ -1745,12 +1747,18 @@ reset_delete_data() {
     local bucket
     bucket=$(reset_effective_bucket)
     echo -e "${YELLOW}Emptying s3://${bucket}/warehouse/ and mlflow-artifacts/...${NC}"
-    # Fail-stop on a genuine S3 error (unreachable endpoint / missing bucket): a reset
-    # that deleted nothing must not report success (plan 1.15.3, I-52b). An
-    # already-empty or absent prefix still returns 0, so this never misfires on a
-    # clean slate.
-    aws_s3 rm "s3://${bucket}/warehouse/" --recursive >/dev/null || return 1
-    aws_s3 rm "s3://${bucket}/mlflow-artifacts/" --recursive >/dev/null || return 1
+    # Fail-stop on a genuine S3 error, but NOT on a missing bucket. An unreachable
+    # endpoint and an absent bucket both make `rm` exit non-zero, yet only the former
+    # is a real failure — a fresh stack whose bucket was never created has simply
+    # nothing to delete. So probe the endpoint (lists buckets; rc=0 iff reachable,
+    # even with zero buckets): if it is down we fail-stop (plan 1.15.3, I-52b);
+    # otherwise the rm's own failure is a benign missing-bucket/empty-prefix no-op.
+    if ! aws_s3 ls >/dev/null 2>&1; then
+        echo -e "  ${RED}!${NC} S3 endpoint unreachable — cannot empty object store" >&2
+        return 1
+    fi
+    aws_s3 rm "s3://${bucket}/warehouse/" --recursive >/dev/null 2>&1 || true
+    aws_s3 rm "s3://${bucket}/mlflow-artifacts/" --recursive >/dev/null 2>&1 || true
 
     if [ "$mode" = "data" ]; then
         # DBs survive in --data, so clear the dangling rows (plan 1.14.1, 1.18.4) —
@@ -1816,8 +1824,12 @@ for cat in pages("/catalogs", "catalogs"):
     c = cat["name"]
     for sch in pages(f"/schemas?catalog_name={c}", "schemas"):
         s = sch["name"]
-        for tbl in pages(f"/tables?catalog_name={c}&schema_name={s}", "tables"):
-            req("DELETE", f"/tables/{c}.{s}.{tbl['name']}")
+        # Materialize the FULL table list BEFORE deleting: UC's next_page_token is
+        # offset-based, so deleting while paginating would shift the cursor and skip
+        # later pages (leaving stale registrations). list-then-delete avoids that.
+        names = [t["name"] for t in pages(f"/tables?catalog_name={c}&schema_name={s}", "tables")]
+        for name in names:
+            req("DELETE", f"/tables/{c}.{s}.{name}")
 PY
     if [ "$rc" -ne 0 ]; then
         echo -e "  ${YELLOW}!${NC} UC registration clear may be incomplete" >&2
@@ -2198,7 +2210,7 @@ cmd_backup() {
     local out=""
     while [ $# -gt 0 ]; do
         case "$1" in
-            --out)     out="$2"; shift 2 ;;
+            --out)     [ $# -ge 2 ] || { echo "backup: --out requires a value" >&2; return 2; }; out="$2"; shift 2 ;;
             --yes|-y)  shift ;;  # accepted for symmetry; backup needs no confirmation
             *) echo "backup: unknown argument '$1'" >&2; return 2 ;;
         esac
@@ -2301,7 +2313,7 @@ cmd_restore() {
     local from="" assume_yes=false
     while [ $# -gt 0 ]; do
         case "$1" in
-            --from)    from="$2"; shift 2 ;;
+            --from)    [ $# -ge 2 ] || { echo "restore: --from requires a value" >&2; return 2; }; from="$2"; shift 2 ;;
             --yes|-y)  assume_yes=true; shift ;;
             *) echo "restore: unknown argument '$1'" >&2; return 2 ;;
         esac
@@ -2384,27 +2396,32 @@ cmd_restore() {
 #   artifact run_known=<yes|no> name=<key>
 #   uc-row   objects=<N|NA> location_empty=<yes|no> name=<full>
 doctor_classify() {
-    local line kind
+    local line kind meta name
     while IFS= read -r line; do
         [ -n "$line" ] || continue
         kind="${line%% *}"
+        # Classify ONLY the metadata tokens, never the trailing name= value: an S3
+        # path may itself contain a segment like "type=iceberg" or "registered=yes",
+        # which would otherwise be misread as a token. name= is guaranteed last.
+        meta="${line%% name=*}"
+        name="${line#*name=}"
         case "$kind" in
             prefix)
-                case "$line" in
-                    *"registered=yes"*) : ;;  # registered -> healthy, not an orphan
-                    *"type=delta"*)   echo "DOCTOR class=recoverable-delta name=${line#*name=}" ;;
-                    *"type=iceberg"*) echo "DOCTOR class=doubtful-iceberg name=${line#*name=}" ;;
+                case " $meta " in
+                    *" registered=yes "*) : ;;  # registered -> healthy, not an orphan
+                    *"type=delta"*)   echo "DOCTOR class=recoverable-delta name=${name}" ;;
+                    *"type=iceberg"*) echo "DOCTOR class=doubtful-iceberg name=${name}" ;;
                 esac
                 ;;
             artifact)
-                case "$line" in
-                    *"run_known=no"*) echo "DOCTOR class=unrecoverable-mlflow name=${line#*name=}" ;;
+                case " $meta " in
+                    *" run_known=no "*) echo "DOCTOR class=unrecoverable-mlflow name=${name}" ;;
                 esac
                 ;;
             uc-row)
-                case "$line" in
-                    *"location_empty=yes"*)   echo "DOCTOR class=dangling-catalog-entry name=${line#*name=}" ;;
-                    *"objects=0 "*)           echo "DOCTOR class=dangling-catalog-entry name=${line#*name=}" ;;
+                case " $meta " in
+                    *" location_empty=yes "*) echo "DOCTOR class=dangling-catalog-entry name=${name}" ;;
+                    *" objects=0 "*)          echo "DOCTOR class=dangling-catalog-entry name=${name}" ;;
                 esac
                 ;;
         esac

@@ -11,9 +11,11 @@ Goal: bring everything down cleanly, and know exactly what survives.
 ./lakehouse stop mlflow
 ```
 
-This runs `docker compose down` for each compose file. Containers are removed; **named
-volumes are preserved**, so MLflow runs and Airflow DAG history (which live on mounted
-volumes) survive a restart.
+This runs `docker compose down` for each compose file. Containers are removed but
+persistent state survives a restart: MLflow runs on the `mlflow-data` named volume,
+and Airflow DAG history in the host PostgreSQL `airflow` database (the Airflow compose
+file mounts only `./logs` and `./data`, and declares no named volume — its metadata
+lives in Postgres, not a Compose volume).
 
 **Caveat — Unity Catalog does NOT survive today.** The `uc-data` volume is declared but
 **not mounted** (see `docker-compose-unity-catalog.yml`), so UC keeps its H2 catalog in the

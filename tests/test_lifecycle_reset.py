@@ -91,6 +91,24 @@ class TestU46UCBackendDetection:
     def test_missing_config_defaults_to_h2(self):
         assert _detect_uc_backend("/nonexistent/server.properties") == "h2"
 
+    def test_db_name_with_hyphen_is_not_truncated(self):
+        # Regression: the trailing-junk trim must preserve '-' and '.' (legal in a
+        # PostgreSQL db name); it previously truncated "iceberg-catalog" -> "iceberg".
+        with tempfile.NamedTemporaryFile("w", suffix=".properties", delete=False) as f:
+            f.write(
+                "hibernate.connection.url=jdbc:postgresql://h:5432/iceberg-catalog\n"
+            )
+            p = f.name
+        assert _detect_uc_backend(p) == "postgresql:iceberg-catalog"
+
+    def test_db_name_strips_jdbc_params_and_whitespace(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".properties", delete=False) as f:
+            f.write(
+                "hibernate.connection.url=jdbc:postgresql://h:5432/unity_catalog?ssl=true\n"
+            )
+            p = f.name
+        assert _detect_uc_backend(p) == "postgresql:unity_catalog"
+
     def test_detector_reads_config_not_volume_topology(self):
         body = _func_body("detect_uc_backend")
         # It must key off the properties file, never volume mount state.
@@ -520,6 +538,28 @@ class TestU34OrphanClassifier:
 
     def test_uc_row_with_objects_is_not_flagged(self):
         rows = _classify("uc-row objects=5 location_empty=no name=cat.s.t\n")
+        assert rows == []
+
+    def test_name_value_containing_a_token_is_not_misclassified(self):
+        # Regression: classification must key off the metadata tokens only, never the
+        # trailing name= value. An unregistered Delta prefix whose S3 path literally
+        # contains "registered=yes" (or "type=iceberg") must still be classified from
+        # its real tokens, not the path text.
+        rows = _classify(
+            "prefix type=delta registered=no "
+            "name=s3://b/warehouse/registered=yes/type=iceberg/t\n"
+        )
+        assert rows == [
+            {
+                "class": "recoverable-delta",
+                "name": "s3://b/warehouse/registered=yes/type=iceberg/t",
+            }
+        ]
+
+    def test_objects_unknown_is_never_flagged(self):
+        # A UC row whose object count could not be determined (S3 unreachable) must
+        # NOT be reported as dangling (guards the doctor_inventory_uc F3 fix).
+        rows = _classify("uc-row objects=unknown location_empty=no name=cat.s.t\n")
         assert rows == []
 
     def test_all_four_classes_are_distinct_paths(self):
