@@ -56,14 +56,16 @@ BASE_SERVICES = {
     "mlflow": ["mlflow", "mlflow-agent"],
     "notebooks": ["jupyter"],
 }
-BASE_IS_HOST_MODE = {  # current (main) networking per base — must stay unchanged
-    "spark41": True,
-    "kafka": True,
-    "unity-catalog": False,  # already bridged on lakehouse-network
-    "airflow": True,
-    "mlflow": True,
-    "notebooks": True,
-}
+BASE_IS_HOST_MODE = (
+    {  # networking per base — all bridged after PR #13 CP2 (T-1.3/1.4/1.5)
+        "spark41": False,
+        "kafka": False,
+        "unity-catalog": False,  # bridged on lakehouse-network since before CP2
+        "airflow": False,
+        "mlflow": False,
+        "notebooks": False,
+    }
+)
 
 pytestmark = pytest.mark.merge
 

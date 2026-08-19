@@ -18,28 +18,31 @@ services:
     image: lakehouse-mlflow:3.13.0
     container_name: mlflow-server
     ports:
-      - "5000:5000"
+      - "5000:5000"   # tracking
+      - "5001:5001"   # AI gateway
     environment:
       # Postgres connection — entrypoint provisions role + db as superuser
       # then hands MLflow its own credentials. Superuser creds come from .env.
-      POSTGRES_HOST: "${POSTGRES_HOST:-localhost}"
+      # On the bridge, the metastore is the `postgres` service.
+      POSTGRES_HOST: "postgres"
       POSTGRES_PORT: "${POSTGRES_PORT:-5432}"
       POSTGRES_USER: "${POSTGRES_USER:-postgres}"
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-}"
       MLFLOW_PG_USER: "${MLFLOW_PG_USER:-mlflow}"
       MLFLOW_PG_PASS: "${MLFLOW_PG_PASS:-mlflow_password}"
       MLFLOW_PG_DB: "${MLFLOW_PG_DB:-mlflow}"
-      # Artifact storage: SeaweedFS via S3
+      # Artifact storage: SeaweedFS via S3 (bridge service name)
       MLFLOW_ARTIFACTS_DESTINATION: "s3://lakehouse/mlflow-artifacts"
       AWS_ACCESS_KEY_ID: "${S3_ACCESS_KEY:-admin}"
       AWS_SECRET_ACCESS_KEY: "${S3_SECRET_KEY:-admin_password}"
-      MLFLOW_S3_ENDPOINT_URL: "http://localhost:8333"
+      MLFLOW_S3_ENDPOINT_URL: "http://seaweedfs:8333"
       # AI Gateway config
       MLFLOW_GATEWAY_CONFIG: "/config/gateway-config.yml"
     volumes:
       - ./config/mlflow:/config:ro
       - mlflow-data:/mlflow
-    network_mode: host
+    networks:
+      - lakehouse-network
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 30s
@@ -52,15 +55,20 @@ services:
     image: apache/spark:4.1.0-scala2.13-java21-python3-r-ubuntu
     container_name: spark-mlflow-agent
     user: root
-    network_mode: "host"
     env_file: .env
+    networks:
+      - lakehouse-network
+    # Ollama runs on the HOST (not a Compose service), so this sidecar reaches it
+    # via the host-gateway — the one legitimate external-host dependency.
+    extra_hosts:
+      - host.docker.internal:host-gateway
     environment:
-      - MLFLOW_TRACKING_URI=http://localhost:5000
-      - SPARK_MASTER=spark://localhost:7078
-      # Full OSS: GPT-OSS 20B via Ollama. No API keys needed.
+      - MLFLOW_TRACKING_URI=http://mlflow-server:5000
+      - SPARK_MASTER=spark://spark-master-41:7078
+      # Full OSS: GPT-OSS 20B via Ollama on the host. No API keys needed.
       - LLM_MODEL=gpt-oss:20b
       - LLM_PROVIDER=openai
-      - OLLAMA_BASE_URL=http://localhost:11434/v1
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
       - PYTHONPATH=/opt/spark/python:/opt/spark/python/lib/py4j-0.10.9.9-src.zip
       - SPARK_HOME=/opt/spark
     volumes:
@@ -79,3 +87,7 @@ services:
 
 volumes:
   mlflow-data:
+
+networks:
+  lakehouse-network:
+    driver: bridge

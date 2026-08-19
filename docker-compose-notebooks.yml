@@ -21,11 +21,18 @@ services:
       dockerfile: docker/jupyter/Dockerfile
     image: lakehouse-jupyter:spark-4.1.0
     container_name: jupyter
-    network_mode: "host"
     user: root
+    ports:
+      - "8889:8889"
     volumes:
       - ./notebooks:/home/jovyan/notebooks
       - ./scripts:/home/jovyan/scripts
       - ./data:/home/jovyan/data
       - ./jars:/home/jovyan/jars
     working_dir: /home/jovyan/notebooks
+    networks:
+      - lakehouse-network
+
+networks:
+  lakehouse-network:
+    driver: bridge
