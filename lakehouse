@@ -898,16 +898,15 @@ cmd_test() {
     local failures=0
 
     echo -e "${YELLOW}1. Testing PostgreSQL connection...${NC}"
-    local pg_user="${POSTGRES_USER:-postgres}"
-    local pg_pass="${POSTGRES_PASSWORD:-}"
-    local pg_host="${POSTGRES_HOST:-localhost}"
-    pg_host="${pg_host/host.docker.internal/localhost}"  # Convert Docker hostname to localhost
-    if PGPASSWORD="$pg_pass" psql -h "$pg_host" -U "$pg_user" -d iceberg_catalog -c "SELECT 1;" >/dev/null 2>&1; then
+    # Use pg_psql (host client if present, else the version-matched dockerized
+    # client) so the check works against the Composed PostgreSQL without a host
+    # psql install (PR #13).
+    if pg_psql -d iceberg_catalog -c "SELECT 1;" >/dev/null 2>&1; then
         echo -e "   ${GREEN}✓${NC} PostgreSQL connected"
     else
         echo -e "   ${RED}✗${NC} PostgreSQL failed"
-        echo -e "   ${YELLOW}→ Check: systemctl status postgresql${NC}"
-        echo -e "   ${YELLOW}→ Verify POSTGRES_USER in .env matches your database user${NC}"
+        echo -e "   ${YELLOW}→ Check that storage is running: ./lakehouse start storage${NC}"
+        echo -e "   ${YELLOW}→ Verify POSTGRES_USER/PASSWORD in .env match the postgres service${NC}"
         ((failures++))
     fi
 

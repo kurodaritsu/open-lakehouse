@@ -78,9 +78,12 @@ services:
     volumes:
       - seaweedfs-data:/data
     healthcheck:
-      # Master status returns 200 when the server is up; the S3 port itself
-      # answers 403 to anonymous requests (see init-storage.sh / U verification).
-      test: ["CMD-SHELL", "wget -q -O /dev/null http://localhost:9333/cluster/status || exit 1"]
+      # The master HTTP (9333) returns 200 when weed is up. Use 127.0.0.1, NOT
+      # localhost: weed binds IPv4 only, and busybox resolves localhost to ::1
+      # first (nothing listening there) — so a localhost probe spuriously fails.
+      # The S3 port (8333) is unusable for health: it answers 403 to the
+      # anonymous probe, which wget treats as an error.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9333/ || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5

@@ -58,6 +58,21 @@ init_s3() {
 
   local aws=(aws --endpoint-url "${S3_ENDPOINT}")
 
+  # SeaweedFS opens the S3 TCP port a beat before the gateway accepts API calls
+  # (a fresh start can briefly close the connection). Wait for real readiness
+  # before bootstrapping, so `start storage` is deterministic.
+  local i
+  for i in 1 2 3 4 5 6 7 8; do
+    if "${aws[@]}" s3 ls >/dev/null 2>&1; then
+      break
+    fi
+    if [ "${i}" -eq 8 ]; then
+      echo "  S3 endpoint ${S3_ENDPOINT} not ready after retries" >&2
+      return 1
+    fi
+    sleep "${i}"
+  done
+
   # Bucket (idempotent): head-bucket succeeds if it already exists.
   if "${aws[@]}" s3api head-bucket --bucket "${S3_BUCKET}" >/dev/null 2>&1; then
     log "bucket ${S3_BUCKET} already exists"
