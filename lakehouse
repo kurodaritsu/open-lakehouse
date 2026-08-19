@@ -1644,7 +1644,7 @@ pg_psql() {
         host="${host//localhost/host.docker.internal}"
         docker run --rm -i --add-host=host.docker.internal:host-gateway \
             -e PGPASSWORD="${POSTGRES_PASSWORD:-}" \
-            "${LAKEHOUSE_PG_CLIENT_IMAGE:-postgres:15-alpine}" \
+            "${LAKEHOUSE_PG_CLIENT_IMAGE:-postgres:16-alpine}" \
             psql -h "$host" -p "${POSTGRES_PORT:-5432}" -U "${POSTGRES_USER:-postgres}" "$@"
     fi
 }
@@ -2165,21 +2165,18 @@ backup_unquiesce_writers() {
 
 # pg_dump a single database to <dir>/<db>.dump — custom format WITH --create, so the
 # archive carries CREATE DATABASE ... OWNER and object GRANTs (I-29 ownership/grants).
-# Prefers a host pg_dump; falls back to a dockerized client with <dir> mounted.
+# Always uses a version-matched dockerized client (PR #13/T-1.20a): the Composed
+# PostgreSQL is a pinned major version (16), and a host pg_dump of an OLDER major
+# aborts with "server version mismatch". Pinning LAKEHOUSE_PG_CLIENT_IMAGE to the
+# server's major keeps backup/restore correct regardless of the host's pg tooling.
 pg_dump_db() {
     local db="$1" dir="$2" host="${POSTGRES_HOST:-localhost}"
-    if command -v pg_dump >/dev/null 2>&1; then
-        host="${host/host.docker.internal/localhost}"
-        PGPASSWORD="${POSTGRES_PASSWORD:-}" pg_dump -h "$host" -p "${POSTGRES_PORT:-5432}" \
-            -U "${POSTGRES_USER:-postgres}" -Fc --create -d "$db" -f "${dir}/${db}.dump"
-    else
-        host="${host//127.0.0.1/host.docker.internal}"; host="${host//localhost/host.docker.internal}"
-        docker run --rm --add-host=host.docker.internal:host-gateway \
-            -e PGPASSWORD="${POSTGRES_PASSWORD:-}" -v "${dir}:/backup" \
-            "${LAKEHOUSE_PG_CLIENT_IMAGE:-postgres:15-alpine}" \
-            pg_dump -h "$host" -p "${POSTGRES_PORT:-5432}" -U "${POSTGRES_USER:-postgres}" \
-            -Fc --create -d "$db" -f "/backup/${db}.dump"
-    fi
+    host="${host//127.0.0.1/host.docker.internal}"; host="${host//localhost/host.docker.internal}"
+    docker run --rm --add-host=host.docker.internal:host-gateway \
+        -e PGPASSWORD="${POSTGRES_PASSWORD:-}" -v "${dir}:/backup" \
+        "${LAKEHOUSE_PG_CLIENT_IMAGE:-postgres:16-alpine}" \
+        pg_dump -h "$host" -p "${POSTGRES_PORT:-5432}" -U "${POSTGRES_USER:-postgres}" \
+        -Fc --create -d "$db" -f "/backup/${db}.dump"
 }
 
 # Restore a single database from <dir>/<db>.dump. --create --clean --if-exists drops
@@ -2192,18 +2189,13 @@ pg_restore_db() {
     pg_psql -d postgres -c \
         "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${db}' AND pid <> pg_backend_pid();" \
         >/dev/null 2>&1 || true
-    if command -v pg_restore >/dev/null 2>&1; then
-        host="${host/host.docker.internal/localhost}"
-        PGPASSWORD="${POSTGRES_PASSWORD:-}" pg_restore -h "$host" -p "${POSTGRES_PORT:-5432}" \
-            -U "${POSTGRES_USER:-postgres}" --create --clean --if-exists -d postgres "${dir}/${db}.dump"
-    else
-        host="${host//127.0.0.1/host.docker.internal}"; host="${host//localhost/host.docker.internal}"
-        docker run --rm --add-host=host.docker.internal:host-gateway \
-            -e PGPASSWORD="${POSTGRES_PASSWORD:-}" -v "${dir}:/backup:ro" \
-            "${LAKEHOUSE_PG_CLIENT_IMAGE:-postgres:15-alpine}" \
-            pg_restore -h "$host" -p "${POSTGRES_PORT:-5432}" -U "${POSTGRES_USER:-postgres}" \
-            --create --clean --if-exists -d postgres "/backup/${db}.dump"
-    fi
+    # Version-matched dockerized client (see pg_dump_db) — also what I-53 asserts.
+    host="${host//127.0.0.1/host.docker.internal}"; host="${host//localhost/host.docker.internal}"
+    docker run --rm --add-host=host.docker.internal:host-gateway \
+        -e PGPASSWORD="${POSTGRES_PASSWORD:-}" -v "${dir}:/backup:ro" \
+        "${LAKEHOUSE_PG_CLIENT_IMAGE:-postgres:16-alpine}" \
+        pg_restore -h "$host" -p "${POSTGRES_PORT:-5432}" -U "${POSTGRES_USER:-postgres}" \
+        --create --clean --if-exists -d postgres "/backup/${db}.dump"
 }
 
 # Sync between S3 and a LOCAL directory. Prefers host aws; else a dockerized aws-cli
