@@ -45,9 +45,8 @@ services:
 
   seaweedfs:
     # SeaweedFS S3-compatible object store (master+volume+filer+s3 in one binary).
-    # TODO(CP1 bring-up): pull-verify / pin this tag once Colima is running — it
-    # could not be pulled in the build session (daemon down). §2.1 exercised
-    # `chrislusf/seaweedfs:latest`; pin to the digest observed at first bring-up.
+    # Verified 2026-08-19: `chrislusf/seaweedfs:3.80` (version 3.80 7b3c0e937),
+    # digest sha256:1055999e08eed1789b0ae45d235126e4495e23d3fb9d6396293fd42539b1ae6a.
     image: chrislusf/seaweedfs:3.80
     container_name: seaweedfs
     ports:

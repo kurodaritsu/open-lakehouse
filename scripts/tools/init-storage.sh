@@ -33,6 +33,13 @@ POSTGRES_PORT="${POSTGRES_PORT:-5432}"
 POSTGRES_USER="${POSTGRES_USER:-postgres}"
 POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-postgres}"
 
+# This bootstrap runs HOST-side against the published ports, so the container-only
+# alias host.docker.internal (still the .env default until the bridge conversion)
+# is rewritten to localhost. An overlay/CI run can point these at run-scoped
+# endpoints via the environment instead.
+S3_ENDPOINT="${S3_ENDPOINT//host.docker.internal/localhost}"
+POSTGRES_HOST="${POSTGRES_HOST//host.docker.internal/localhost}"
+
 # Warehouse prefixes to materialize (as zero-byte folder markers).
 WAREHOUSE_PREFIXES=(bronze silver gold _checkpoints pipeline-history)
 
@@ -69,15 +76,20 @@ init_s3() {
 }
 
 # --- PostgreSQL -----------------------------------------------------------
+# Runs psql INSIDE the postgres container (the client is always present there and
+# the storage layer is Compose-managed), so no host psql install is required.
+# POSTGRES_CONTAINER overrides the container name for overlay/CI runs.
 init_databases() {
-  echo "PostgreSQL (${POSTGRES_HOST}:${POSTGRES_PORT}):"
-  export PGPASSWORD="${POSTGRES_PASSWORD}"
-  local psql=(psql -h "${POSTGRES_HOST}" -p "${POSTGRES_PORT}" -U "${POSTGRES_USER}" -d postgres -tAc)
+  local container="${POSTGRES_CONTAINER:-postgres}"
+  echo "PostgreSQL (container ${container}):"
+
+  local psql=(docker exec -e "PGPASSWORD=${POSTGRES_PASSWORD}" "${container}"
+              psql -U "${POSTGRES_USER}" -d postgres -tAc)
 
   local db exists
   for db in "${MANAGED_DATABASES[@]}"; do
     exists="$("${psql[@]}" "SELECT 1 FROM pg_database WHERE datname = '${db}'" 2>/dev/null || true)"
-    if [ "${exists}" = "1" ]; then
+    if [ "${exists//[[:space:]]/}" = "1" ]; then
       log "database ${db} already exists"
     else
       "${psql[@]}" "CREATE DATABASE ${db}" >/dev/null
