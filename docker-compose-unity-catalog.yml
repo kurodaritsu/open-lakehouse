@@ -44,7 +44,11 @@ services:
       - type: bind
         source: ./config/unity-catalog/server.properties
         target: /home/unitycatalog/etc/conf/server.properties
-      #- uc-data:/home/unitycatalog/etc/db
+      # uc-data mounted (PR #13 / T-1.20b): persists UC's embedded H2 store to a
+      # named volume so backup/restore can cover it via the volume rather than a
+      # docker cp of an ephemeral container layer. UC stays on embedded H2 — this
+      # only makes that state durable; it does NOT point UC at PostgreSQL.
+      - uc-data:/home/unitycatalog/etc/db
       - uc-logs:/home/unitycatalog/etc/logs
     healthcheck:
       # The image ships busybox wget, NOT curl — a curl-based check can never pass and
