@@ -437,10 +437,12 @@ cmd_status_json() {
     # literals on the default path except the allow-listed mlflow->mlflow-server fix
     # (T-1.5.11), and run-scoped when a test overlay is active (docker ps sees the
     # suffixed names). PostgreSQL and SeaweedFS are now Compose services
-    # (docker-compose-storage.yml, PR #13/T-1.2) publishing 5432/8333 to the host, so
-    # the health probes go through resolve_port (offset under an active overlay).
-    local pg_ok=$(is_service_healthy "$(resolve_port 5432)" && echo "true" || echo "false")
-    local s3_ok=$(is_service_healthy "$(resolve_port 8333)" && echo "true" || echo "false")
+    # (docker-compose-storage.yml, PR #13/T-1.2) publishing 5432/8333 to the host.
+    # Storage has NO test overlay, so it always publishes the fixed ports and is
+    # never port-offset — probe them directly (matches `__resolve`, which hardcodes
+    # them). Using resolve_port here would wrongly offset under an active overlay.
+    local pg_ok=$(is_service_healthy 5432 && echo "true" || echo "false")
+    local s3_ok=$(is_service_healthy 8333 && echo "true" || echo "false")
     local spark_master=$(is_container_running "$(resolve_container_name spark-master-41)" && echo "true" || echo "false")
     local spark_worker=$(is_container_running "$(resolve_container_name spark-worker-41)" && echo "true" || echo "false")
     local spark_connect=$(is_container_running "$(resolve_container_name spark-connect-41)" && echo "true" || echo "false")
@@ -501,9 +503,9 @@ cmd_status_human() {
 
     echo -e "\n${YELLOW}Storage (SeaweedFS + PostgreSQL):${NC}"
     check_container "$(resolve_container_name postgres)" || true
-    check_service postgres "$(resolve_port 5432)" "PostgreSQL"
+    check_service postgres "5432" "PostgreSQL"
     check_container "$(resolve_container_name seaweedfs)" || true
-    check_service seaweedfs "$(resolve_port 8333)" "SeaweedFS S3"
+    check_service seaweedfs "8333" "SeaweedFS S3"
 
     echo -e "\n${YELLOW}Unity Catalog:${NC}"
     check_container "$uc_ct" && check_service uc 8081 "Unity Catalog REST API" || true
@@ -656,18 +658,18 @@ check_ports_for_service() {
 
     case $service in
         storage)
-            if ! check_port_available "$(resolve_port 5432)" "$(resolve_container_name postgres)"; then
-                echo -e "  ${RED}✗${NC} Port $(resolve_port 5432) (PostgreSQL) blocked by another process"
+            if ! check_port_available "5432" "$(resolve_container_name postgres)"; then
+                echo -e "  ${RED}✗${NC} Port 5432 (PostgreSQL) blocked by another process"
                 has_conflicts=1
             else
-                echo -e "  ${GREEN}✓${NC} Port $(resolve_port 5432) (PostgreSQL) available"
+                echo -e "  ${GREEN}✓${NC} Port 5432 (PostgreSQL) available"
             fi
 
-            if ! check_port_available "$(resolve_port 8333)" "$(resolve_container_name seaweedfs)"; then
-                echo -e "  ${RED}✗${NC} Port $(resolve_port 8333) (SeaweedFS S3) blocked by another process"
+            if ! check_port_available "8333" "$(resolve_container_name seaweedfs)"; then
+                echo -e "  ${RED}✗${NC} Port 8333 (SeaweedFS S3) blocked by another process"
                 has_conflicts=1
             else
-                echo -e "  ${GREEN}✓${NC} Port $(resolve_port 8333) (SeaweedFS S3) available"
+                echo -e "  ${GREEN}✓${NC} Port 8333 (SeaweedFS S3) available"
             fi
             ;;
     esac
@@ -697,12 +699,16 @@ cmd_start() {
     echo ""
 
     case $service in
-        storage)
+        storage|all)
+            # `all` starts storage FIRST (this arm runs before the spark/kafka
+            # arms below). Since PR #13 moved PostgreSQL/SeaweedFS into Compose,
+            # `start all` must bring them up — otherwise Spark/UC/Delta come up
+            # pointing at an absent metastore/object store.
             echo -e "${YELLOW}Starting storage (SeaweedFS + PostgreSQL)...${NC}"
             overlay_set_compose_args storage || return 1
             docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d
-            wait_for_service "PostgreSQL" "nc -z localhost $(resolve_port 5432)" 60
-            wait_for_service "SeaweedFS S3" "nc -z localhost $(resolve_port 8333)" 60
+            wait_for_service "PostgreSQL" "nc -z localhost 5432" 60
+            wait_for_service "SeaweedFS S3" "nc -z localhost 8333" 60
             echo -e "${YELLOW}Bootstrapping buckets / prefixes / databases...${NC}"
             if bash scripts/tools/init-storage.sh; then
                 echo -e "${GREEN}Storage ready.${NC}"
@@ -837,10 +843,18 @@ cmd_stop() {
     esac
 
     case $service in
-        storage|spark|kafka|all|unity-catalog|uc|airflow|mlflow)
+        notebooks)
+            echo -e "${YELLOW}Stopping notebooks (Jupyter)...${NC}"
+            overlay_set_compose_args notebooks || return 1
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down
+            ;;
+    esac
+
+    case $service in
+        storage|spark|kafka|all|unity-catalog|uc|airflow|mlflow|notebooks)
             ;;
         *)
-            echo "Usage: lakehouse stop [storage|spark|kafka|airflow|unity-catalog|mlflow|all]"
+            echo "Usage: lakehouse stop [storage|spark|kafka|airflow|unity-catalog|mlflow|notebooks|all]"
             exit 1
             ;;
     esac
@@ -1480,14 +1494,16 @@ reset_volume_mode() {
         uc-data)               echo "metadata,all" ;;  # catalog state (mounted PR #13/T-1.20b)
         uc-logs)               echo "never" ;;         # diagnostics — never destroyed
         # Composed storage (PR #13/T-1.2): postgres-data holds EVERY database and
-        # seaweedfs-data the WHOLE object store. --data (S3 object deletion) and
-        # --metadata (per-DB drop-recreate) operate at object/row granularity and
-        # must NOT coarse-remove these — doing so under --metadata --keep-mlflow
-        # would destroy the preserved mlflow DB, and under --data would drop the
-        # bucket + SeaweedFS identities. Only --all (nuclear; forbids --keep-mlflow)
-        # removes them for a from-scratch rebuild.
-        postgres-data)         echo "all" ;;
-        seaweedfs-data)        echo "all" ;;
+        # seaweedfs-data the WHOLE object store. Their CONTENT is reset by the
+        # database drop-recreate and S3 bucket-clear steps (emitted separately in
+        # the plan) — the volumes themselves are NEVER removed. reset does not
+        # quiesce the storage services, so `docker volume rm` on these would fail
+        # ("in use") anyway; and a volume wipe is unnecessary since the content is
+        # already reset in place. Marked "never" so `--dry-run` doesn't claim a
+        # volume removal that never happens (dry-run honesty). Other volumes whose
+        # services ARE quiesced (uc-data, mlflow-data, spark-data) remain removable.
+        postgres-data)         echo "never" ;;
+        seaweedfs-data)        echo "never" ;;
         spark-data|spark-logs) echo "data,all" ;;      # job scratch + event logs
         *)                     echo "data,all" ;;      # default: data-plane scratch
     esac
@@ -1770,6 +1786,7 @@ quiesce_containers_for() {
         unity-catalog) resolve_container_name unity-catalog ;;
         mlflow)        resolve_container_name mlflow ;;
         airflow)       echo "$(resolve_container_name airflow-webserver) $(resolve_container_name airflow-scheduler) $(resolve_container_name airflow-triggerer)" ;;
+        notebooks)     resolve_container_name jupyter ;;
     esac
 }
 
@@ -1799,9 +1816,9 @@ reset_stop_services() {
 # registrations are cleared via REST), so UC is not in the --data set.
 reset_quiesce() {
     case "$1" in
-        data)     reset_stop_services spark kafka mlflow airflow ;;
-        metadata) reset_stop_services unity-catalog mlflow airflow ;;
-        all)      reset_stop_services spark kafka unity-catalog mlflow airflow ;;
+        data)     reset_stop_services spark kafka mlflow airflow notebooks ;;
+        metadata) reset_stop_services unity-catalog mlflow airflow notebooks ;;
+        all)      reset_stop_services spark kafka unity-catalog mlflow airflow notebooks ;;
     esac
 }
 
@@ -2848,8 +2865,9 @@ cmd_resolve() {
     # these values are the resolver's arithmetic, not live connection targets, and
     # runtime health probes deliberately use the fixed base ports.
     echo "ports_published_by_overlays=none"
-    # PostgreSQL and SeaweedFS are host-installed (outside Compose): fixed ports,
-    # never offset. Only containerized services can take a port offset.
+    # PostgreSQL and SeaweedFS are Composed (PR #13) but have NO test overlay, so
+    # they always publish fixed ports and are never offset. Only overlaid services
+    # take a port offset.
     echo "port.postgresql=5432"
     echo "port.seaweedfs=8333"
     echo "port.unity_catalog=$(resolve_port 8081)"

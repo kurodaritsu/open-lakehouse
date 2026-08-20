@@ -107,8 +107,12 @@ class TestU19StorageCliRegistration:
 
     def test_port_preflight_has_storage_case(self):
         text = CLI.read_text()
-        assert re.search(r"resolve_port 5432.*PostgreSQL", text, re.S)
-        assert re.search(r"resolve_port 8333.*SeaweedFS", text, re.S)
+        # Storage ports are fixed (never offset — storage has no test overlay),
+        # so the preflight checks the literal 5432 for PostgreSQL.
+        assert 'check_port_available "5432"' in text
+        assert "Port 5432 (PostgreSQL)" in text
+        assert 'check_port_available "8333"' in text
+        assert "Port 8333 (SeaweedFS S3)" in text
 
     def test_init_storage_is_executable_and_shellcheck_shape(self):
         assert INIT_SCRIPT.exists()
@@ -120,15 +124,19 @@ class TestU19StorageCliRegistration:
 
 @pytest.mark.storage
 class TestStorageVolumeResetMode:
-    """The Composed storage volumes are removed ONLY by --all (plan 1.14.7 /
-    PR #13 T-1.20a): --data/--metadata operate at object/DB granularity so they
-    must not coarse-remove the whole metastore or object store."""
+    """The Composed storage volumes (postgres-data / seaweedfs-data) are NEVER
+    removed by any reset mode (PR #13 T-1.20a, review fix): reset does not quiesce
+    the storage services, so a `docker volume rm` would fail anyway, and their
+    CONTENT is reset in place by the DB drop-recreate + S3 bucket-clear steps.
+    Marking them "never" keeps `--dry-run` honest (it must not report a volume
+    removal that never happens)."""
 
-    def test_postgres_and_seaweedfs_are_all_only(self):
+    def test_postgres_and_seaweedfs_volumes_never_removed(self):
         text = CLI.read_text()
-        # reset_volume_mode maps both to exactly "all".
-        assert re.search(r'postgres-data\)\s*echo "all"', text)
-        assert re.search(r'seaweedfs-data\)\s*echo "all"', text)
+        # reset_volume_mode maps both to "never" (content reset in place, not by
+        # volume removal — dry-run must not over-promise).
+        assert re.search(r'postgres-data\)\s*echo "never"', text)
+        assert re.search(r'seaweedfs-data\)\s*echo "never"', text)
 
 
 @pytest.mark.storage
