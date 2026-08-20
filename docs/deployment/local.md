@@ -126,15 +126,15 @@ docker system prune -f
 
 ## Networking
 
-The stack uses `network_mode: host`:
-- All containers share host network
-- No port mapping needed
-- `localhost` works everywhere
+The stack runs on a shared Docker **bridge network** (`lakehouse-network`):
+- Containers address peers by **service name** (`unity-catalog:8080`,
+  `seaweedfs:8333`, `kafka:9092`, `postgres:5432`, `spark-master-41:7078`).
+- Host-facing services **publish ports**; from the host use `localhost:<port>`
+  (`sc://localhost:15002`, `localhost:8081`, `localhost:8333`, …).
+- The network is project-scoped, so multiple stacks can run side by side under
+  distinct `COMPOSE_PROJECT_NAME` values without port collisions.
 
-This means:
-- Simpler configuration
-- No Docker network isolation
-- Ports must not conflict with host services
+Only published ports must be free on the host; in-container ports never collide.
 
 ## Troubleshooting
 

@@ -257,13 +257,15 @@ def post(path, body, ok_conflict=True):
     except urllib.error.HTTPError as e:
         if not (ok_conflict and e.code in (400, 409)):
             raise
+# UC 0.5.0 validates the column type descriptor — an empty type_json 400s.
+tj = json.dumps({{"name": "id", "type": "integer", "nullable": True, "metadata": {{}}}})
 post("/catalogs", {{"name": "{cat}"}})
 post("/schemas", {{"name": "{sch}", "catalog_name": "{cat}"}})
 post("/tables", {{"name": "{tbl}", "catalog_name": "{cat}", "schema_name": "{sch}",
     "table_type": "EXTERNAL", "data_source_format": "DELTA",
     "storage_location": "{location}",
     "columns": [{{"name": "id", "type_text": "int", "type_name": "INT",
-                 "type_json": "{{}}", "position": 0, "nullable": True}}]}},
+                 "type_json": tj, "position": 0, "nullable": True}}]}},
     ok_conflict=False)
 print("ok")
 """

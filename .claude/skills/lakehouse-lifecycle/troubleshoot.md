@@ -23,8 +23,8 @@ Match the user-reported symptom to a row, then run the diagnostic. If diagnostic
 | Spark job OOMs on first run | `docker stats spark-worker-41` while job runs | Bump `spark.driver.memory` / `spark.executor.memory` in `config/spark/spark-defaults.conf`. Defaults are 4g/8g — fine for demos, light for production. |
 | `lakehouse status` shows "Spark master not running" but `docker ps` shows it | Container name mismatch — must be `spark-master-41` | Did you start with the right compose file? `docker-compose-spark41.yml` is the only valid one. |
 | Kafka producer fails with "Topic does not exist" | `docker exec kafka kafka-topics --list --bootstrap-server localhost:9092` | Auto-topic-creation is on by default; if disabled, create explicitly via `kafka-topics --create`. |
-| Unity Catalog returns 401 | `curl -v http://localhost:8081/api/2.1/unity-catalog/catalogs` | UC OSS 0.4.x runs without auth by default for local. If a token is being sent, your client is misconfigured. |
-| Delta tables aren't visible via UC REST | Expected — UC OSS 0.4.x Iceberg REST endpoint surfaces Iceberg only | Use UC's Delta-native API path, or use UniForm which projects Delta as Iceberg. |
+| Unity Catalog returns 401 | `curl -v http://localhost:8081/api/2.1/unity-catalog/catalogs` | UC OSS 0.5.0 runs without auth by default for local. If a token is being sent, your client is misconfigured. |
+| Delta tables aren't visible via the UC **Iceberg** REST endpoint | Expected — that endpoint surfaces Iceberg only | Delta tables live under UC's native `/tables` API (catalog `unity.*`); read them via Spark. UniForm (Delta→Iceberg-readable metadata) is an untested avenue here, not a supported path. |
 
 ## When all else fails
 

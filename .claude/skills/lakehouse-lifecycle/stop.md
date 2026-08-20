@@ -12,24 +12,26 @@ Goal: bring everything down cleanly, and know exactly what survives.
 ```
 
 This runs `docker compose down` for each compose file. Containers are removed but
-persistent state survives a restart: MLflow runs on the `mlflow-data` named volume,
-and Airflow DAG history in the host PostgreSQL `airflow` database (the Airflow compose
-file mounts only `./logs` and `./data`, and declares no named volume — its metadata
-lives in Postgres, not a Compose volume).
+**all persistent state survives a restart**, because it lives in named volumes and
+the Composed `postgres` service (PR #13):
+- databases (UC / MLflow / Airflow / `iceberg_catalog`) → `postgres-data`;
+- object data (every Delta table, MLflow artifacts) → `seaweedfs-data`;
+- UC's embedded H2 catalog → `uc-data` (now **mounted**, see
+  `docker-compose-unity-catalog.yml` — UC metadata persists across a plain stop);
+- MLflow local state → `mlflow-data`; Spark event logs → `spark-data`.
 
-**Caveat — Unity Catalog does NOT survive today.** The `uc-data` volume is declared but
-**not mounted** (see `docker-compose-unity-catalog.yml`), so UC keeps its H2 catalog in the
-container's writable layer. Plain `down` removes the container and therefore **loses all UC
-catalog metadata** (catalogs, schemas, table registrations). If you need UC state to persist
-across a stop, take a backup first (below). (Mounting `uc-data` is planned for a later PR.)
+Plain `down` (no `-v`) removes only containers and networks; none of the above is lost.
 
 To restart later, follow [start.md](start.md) from Step 3.
 
 ## Start fresh — use `./lakehouse reset`, not `down -v`
 
 When the user asks to "reset", "clean up", or "start fresh", use the reset command — it
-confirms, supports `--dry-run`, and **actually resets the databases and object store**, which
-`down -v` cannot do (host PostgreSQL and SeaweedFS are not reset by removing Compose volumes).
+confirms, supports `--dry-run`, and resets the databases + object store **surgically**.
+**Do NOT use `docker compose down -v`.** Since storage is Composed (PR #13), `-v` now
+**wipes `postgres-data`, `seaweedfs-data`, and `uc-data`** — i.e. every database, all
+object data, and the UC catalog — in one unconfirmed, unrecoverable step. `reset` is the
+safe, granular alternative (and it can preserve MLflow, dry-run, and back up first).
 
 ```bash
 ./lakehouse reset --all --dry-run     # preview every target, destroys nothing

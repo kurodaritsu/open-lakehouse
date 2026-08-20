@@ -117,16 +117,21 @@ For local development, recommended minimums:
 Adjust Docker Desktop resources if needed:
 - Docker Desktop → Settings → Resources
 
-## Network Modes
+## Networking
 
-The stack uses `network_mode: host` for Docker containers, meaning:
-- Containers share the host's network namespace
-- No port mapping needed (containers bind directly)
-- Services communicate via `localhost`
+The stack runs on a shared Docker **bridge network** (`lakehouse-network`):
+- Containers reach each other by **service name** — e.g. Spark talks to
+  `unity-catalog:8080`, `seaweedfs:8333`, `kafka:9092`, `postgres:5432`.
+- Host-facing services **publish ports**, so from your machine you use
+  `localhost:<published-port>` (e.g. `sc://localhost:15002`, `localhost:8081`
+  for Unity Catalog, `localhost:8333` for S3).
+- PostgreSQL and SeaweedFS are **Compose services** (see
+  `docker-compose-storage.yml`), not host-installed — their data lives in named
+  volumes.
 
-This simplifies configuration but requires:
-- No conflicting services on the same ports
-- PostgreSQL and SeaweedFS running on the host
+Because the network is project-scoped, you can run isolated stacks side by side
+by setting `COMPOSE_PROJECT_NAME` (the test harness does this). See the port
+table in the top-level `CLAUDE.md` for the full published-port map.
 
 ## Validation
 
