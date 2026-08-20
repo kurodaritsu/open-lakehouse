@@ -45,8 +45,15 @@ services:
 
   seaweedfs:
     # SeaweedFS S3-compatible object store (master+volume+filer+s3 in one binary).
-    # Verified 2026-08-19: `chrislusf/seaweedfs:3.80` (version 3.80 7b3c0e937),
-    # digest sha256:1055999e08eed1789b0ae45d235126e4495e23d3fb9d6396293fd42539b1ae6a.
+    # PINNED to 3.80 deliberately (PR #13 / Phase 2). SeaweedFS 4.x enforces
+    # X-Amz-Security-Token validation and rejects UC OSS credential vending's
+    # MANDATORY placeholder session token (`s3.sessionToken.0` must be non-empty,
+    # §2.5) with 403 InvalidAccessKeyId — breaking the primary UC-registered write
+    # path (measured on 4.00/4.30/4.40; -s3.iam=false doesn't help). 3.80 tolerates
+    # the token, so it stays until UC OSS or SeaweedFS resolves the conflict.
+    # Tradeoff: 3.80 does NOT enforce conditional PUT `If-None-Match: *` (S-04) —
+    # which only affects CONCURRENT multi-writer Delta commits (the local
+    # single-writer stack never does this). See the seaweedfs-ops skill.
     image: chrislusf/seaweedfs:3.80
     container_name: seaweedfs
     ports:

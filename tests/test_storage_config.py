@@ -129,3 +129,37 @@ class TestStorageVolumeResetMode:
         # reset_volume_mode maps both to exactly "all".
         assert re.search(r'postgres-data\)\s*echo "all"', text)
         assert re.search(r'seaweedfs-data\)\s*echo "all"', text)
+
+
+@pytest.mark.storage
+class TestWarehouseLayoutLint:
+    """U-17 / S-09 (static half): the warehouse-layout lint's collision detector
+    must flag an object at `x` that is also a prefix `x/…` (SeaweedFS's one real
+    S3 incompatibility, §2.3), and leave clean Delta/Iceberg layouts + explicit
+    directory markers alone. The live half runs in tests/integration/."""
+
+    def _find_collisions(self):
+        import importlib.util
+
+        path = REPO_ROOT / "scripts" / "connectivity" / "test-warehouse-layout.py"
+        spec = importlib.util.spec_from_file_location("wl_lint", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.find_collisions
+
+    def test_flags_file_vs_directory_collision(self):
+        fc = self._find_collisions()
+        assert fc(["warehouse/x", "warehouse/x/y"]) == [
+            ("warehouse/x", "warehouse/x/y")
+        ]
+
+    def test_clean_delta_layout_has_no_collision(self):
+        fc = self._find_collisions()
+        assert (
+            fc(["warehouse/t/_delta_log/00000.json", "warehouse/t/part-0.parquet"])
+            == []
+        )
+
+    def test_explicit_directory_marker_is_not_a_collision(self):
+        fc = self._find_collisions()
+        assert fc(["warehouse/d/", "warehouse/d/f"]) == []

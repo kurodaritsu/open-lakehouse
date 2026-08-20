@@ -919,6 +919,24 @@ cmd_test() {
         ((failures++))
     fi
 
+    echo -e "\n${YELLOW}2b. Testing S3 conformance + presigned host-rewrite + layout (PR #13/Phase 2)...${NC}"
+    # These run on the host against localhost:8333 and need boto3 + requests
+    # (poetry deps). Skip with a hint if the runner/deps are unavailable rather
+    # than hard-failing the whole suite on a machine that hasn't run setup.
+    if poetry run python -c "import boto3, requests" >/dev/null 2>&1; then
+        for s3test in test-s3-conformance test-presigned-host-rewrite test-warehouse-layout; do
+            if poetry run python "scripts/connectivity/${s3test}.py"; then
+                echo -e "   ${GREEN}✓${NC} ${s3test} passed"
+            else
+                echo -e "   ${RED}✗${NC} ${s3test} failed"
+                ((failures++))
+            fi
+        done
+    else
+        echo -e "   ${YELLOW}-${NC} boto3/requests unavailable — skipping S3 conformance"
+        echo -e "   ${YELLOW}→ Run: ./lakehouse setup (or poetry install)${NC}"
+    fi
+
     echo -e "\n${YELLOW}3. Testing Kafka...${NC}"
     if docker ps --format '{{.Names}}' | grep -q "^${kafka_ctr}$"; then
         if docker exec "$kafka_ctr" kafka-topics --list --bootstrap-server localhost:9092 >/dev/null 2>&1; then

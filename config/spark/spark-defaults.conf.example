@@ -57,10 +57,11 @@ spark.hadoop.fs.s3a.secret.key            your_secret_key
 spark.hadoop.fs.s3a.path.style.access     true
 spark.hadoop.fs.s3a.impl                  org.apache.hadoop.fs.s3a.S3AFileSystem
 spark.hadoop.fs.s3a.connection.ssl.enabled false
-# SeaweedFS S3 returns HTTP 500 on bulk DeleteObjects and on the Hadoop
-# FileOutputCommitter's directory-marker cleanup. Delete one object at a time
-# and keep directory markers so recursive deletes / commits don't fail.
-spark.hadoop.fs.s3a.multiobjectdelete.enable false
+# Bulk DeleteObjects works on SeaweedFS 3.80 (PR #13 / T-2.6, verified by S-06 +
+# a Spark VACUUM RETAIN 0 HOURS), so multiobjectdelete stays ENABLED (default) —
+# the old `multiobjectdelete.enable false` was stale 3.x caution. Keep directory
+# markers: the Hadoop FileOutputCommitter's marker cleanup can still 500, and
+# Delta commits via _delta_log so retention is harmless.
 spark.hadoop.fs.s3a.directory.marker.retention keep
 
 # UC stores table LOCATIONs as s3:// (no 'a'). Map that scheme to S3AFileSystem
