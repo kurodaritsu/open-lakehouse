@@ -83,6 +83,35 @@ for the D1–D8 pointer.
 - UC Spark connector `0.5.0` is not published (only `0.4.1`); catalog-managed
   Delta relies on connector 0.4.1 + client/hadoop 0.5.1. Track a 0.5.x connector.
 
+### Maintainer notes — pre-existing lifecycle semantics (PR #12), flagged not changed
+
+A code-review pass raised two items in the reset/restore engine that predate this
+PR (they live in the PR #12 lifecycle code). They are **intentional PR #12
+semantics**, not PR #13 regressions, so this PR leaves them as-is and records them
+for a maintainer decision rather than changing lifecycle behavior here:
+
+- **`restore --force` escapes the run-scope guarantee.** `restore_apply` mutates
+  the targets read from the backup MANIFEST (bucket / databases / volumes), and
+  the run-scope reconciliation lives in `restore_validate_targets`, which `--force`
+  skips. `reset_semantic_gate` validates the *current* run's effective targets but
+  never inspects MANIFEST names — so under an active overlay,
+  `restore --from <other-run-artifact> --force` passes the gate and then drives
+  `pg_restore --create --clean` + `s3 sync --delete` against another run's
+  resources. `--force` is a documented, deliberate "discard safety" override (its
+  purpose is to bypass the reconciliation), but it silently also escapes run
+  isolation. If run-scoping should hold even under `--force`, the gate would need
+  to validate the MANIFEST names, not just the current run's.
+
+- **`iceberg_catalog` PostgreSQL DB vs. golden rule #1.** `init-storage.sh`
+  provisions an `iceberg_catalog` database and `reset` drops/recreates it and runs
+  `DELETE FROM iceberg_tables` — the shape of an Iceberg JDBC catalog — while
+  CLAUDE.md golden rule #1 says "no PostgreSQL JDBC catalog path exists." This is
+  the PR #12 reset **target matrix** (§1.13.4) treating `iceberg_catalog` as a
+  resettable database, not a live Spark catalog binding, so the two don't strictly
+  contradict — but the naming invites confusion and should be reconciled (either
+  rename/annotate the reset target, or clarify the rule to mean "no JDBC catalog on
+  the Spark read/write path").
+
 ## Verification
 
 See the "before PR #13 leaves draft" gate report in the session log: 183 unit
