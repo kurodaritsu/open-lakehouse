@@ -280,20 +280,24 @@ class TestEndToEndSetup:
         cursor = conn.cursor()
 
         # Create migrations tracking table
-        cursor.execute("""
+        cursor.execute(
+            """
             CREATE TABLE IF NOT EXISTS _migrations (
                 id SERIAL PRIMARY KEY,
                 filename VARCHAR(255) UNIQUE NOT NULL,
                 applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
-        """)
+        """
+        )
         conn.commit()
 
         # Verify table exists
-        cursor.execute("""
+        cursor.execute(
+            """
             SELECT table_name FROM information_schema.tables
             WHERE table_name = '_migrations'
-        """)
+        """
+        )
         result = cursor.fetchone()
 
         cursor.close()

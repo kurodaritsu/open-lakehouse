@@ -237,7 +237,8 @@ class TestKafkaIcebergPipeline:
 
         # Setup Iceberg table
         spark.sql("CREATE NAMESPACE IF NOT EXISTS iceberg.streaming")
-        spark.sql("""
+        spark.sql(
+            """
             CREATE TABLE IF NOT EXISTS iceberg.streaming.events (
                 event_id STRING,
                 event_type STRING,
@@ -245,7 +246,8 @@ class TestKafkaIcebergPipeline:
                 processed_at TIMESTAMP
             )
             USING iceberg
-        """)
+        """
+        )
 
         # Produce test events
         producer = KafkaProducer(
@@ -295,9 +297,11 @@ class TestKafkaIcebergPipeline:
         assert result.cnt >= 3
 
         # Verify aggregations work
-        total = spark.sql("""
+        total = spark.sql(
+            """
             SELECT SUM(amount) as total
             FROM iceberg.streaming.events
             WHERE event_type = 'purchase'
-        """).collect()[0]
+        """
+        ).collect()[0]
         assert abs(total.total - 249.98) < 0.01

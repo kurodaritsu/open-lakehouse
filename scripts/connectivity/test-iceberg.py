@@ -23,24 +23,28 @@ try:
 
     # 3. Create a new Spark test table
     print("\n3. Creating new spark_test table:")
-    spark.sql("""
+    spark.sql(
+        """
         CREATE TABLE IF NOT EXISTS iceberg.bronze.spark_test (
             id INT,
             name STRING,
             value DOUBLE,
             timestamp TIMESTAMP
         ) USING iceberg
-    """)
+    """
+    )
     print("✅ Table created successfully!")
 
     # 4. Insert test data
     print("\n4. Inserting test data:")
-    spark.sql("""
+    spark.sql(
+        """
         INSERT INTO iceberg.bronze.spark_test VALUES
         (1, 'test1', 100.5, current_timestamp()),
         (2, 'test2', 200.7, current_timestamp()),
         (3, 'test3', 300.9, current_timestamp())
-    """)
+    """
+    )
     print("✅ Data inserted!")
 
     # 5. Read data back
