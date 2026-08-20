@@ -15,7 +15,7 @@ services:
     build:
       context: .
       dockerfile: docker/mlflow/Dockerfile
-    image: lakehouse-mlflow:3.13.0
+    image: lakehouse-mlflow:3.14.0
     container_name: mlflow-server
     ports:
       - "5000:5000"   # tracking
@@ -44,11 +44,14 @@ services:
     networks:
       - lakehouse-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      # The ghcr.io/mlflow/mlflow:*-full image ships NO curl, so a curl-based
+      # check leaves the container perpetually "unhealthy" even though the server
+      # is fine. Python is always present — use it to probe /health.
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:5000/health').getcode()==200 else 1)"]
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 15s
+      start_period: 20s
     restart: unless-stopped
 
   mlflow-agent:

@@ -508,7 +508,7 @@ def test_i52b_failed_reset_stays_stopped_and_doctor_reports(
 
 REAL_DOCKER = shutil.which("docker")
 
-UC_IMAGE = os.environ.get("LAKEHOUSE_UC_IMAGE", "newfrontdocker/unitycatalog:v0.4.1")
+UC_IMAGE = os.environ.get("LAKEHOUSE_UC_IMAGE", "unitycatalog/unitycatalog:v0.5.0")
 PY_IMAGE = os.environ.get("LAKEHOUSE_HTTP_IMAGE", "python:3-alpine")
 ALPINE_IMAGE = os.environ.get("LAKEHOUSE_ALPINE_IMAGE", "alpine:latest")
 

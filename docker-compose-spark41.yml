@@ -80,6 +80,9 @@ services:
   # default client transport. gRPC on 15002 (published, so sc://localhost:15002
   # works from the host). As the Spark driver it must advertise SPARK_LOCAL_IP so
   # executors on the worker can reach it.
+  # No --packages: spark-connect_2.13 is already bundled in /opt/spark/jars of
+  # this image, so we skip the ivy/Maven resolve at cold start (offline-friendly;
+  # Phase 6 air-gapped goal).
   spark-connect-41:
     image: apache/spark:4.1.0-scala2.13-java21-python3-r-ubuntu
     container_name: spark-connect-41
@@ -107,7 +110,6 @@ services:
         --master spark://spark-master-41:7078
         --conf spark.connect.grpc.binding.port=15002
         --conf spark.connect.grpc.binding.host=0.0.0.0
-        --packages org.apache.spark:spark-connect_2.13:4.1.0
         "
     networks:
       - lakehouse-network

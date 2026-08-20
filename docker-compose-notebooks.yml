@@ -24,12 +24,26 @@ services:
     user: root
     ports:
       - "8889:8889"
+    environment:
+      # Token auth (T-1.14 / D5). Supply a real value in .env. The image CMD
+      # requires ?token=<JUPYTER_TOKEN> for the Lab UI; if this is empty it mints
+      # a RANDOM token (still not open) rather than running tokenless — so access
+      # never regresses to the old --ServerApp.token= posture. Rendered with a
+      # ":-" default so `docker compose config` works without a local .env (CI).
+      JUPYTER_TOKEN: ${JUPYTER_TOKEN:-}
     volumes:
       - ./notebooks:/home/jovyan/notebooks
       - ./scripts:/home/jovyan/scripts
       - ./data:/home/jovyan/data
       - ./jars:/home/jovyan/jars
+      - ./demos/sdp-medallion:/home/jovyan/pipelines/sdp-medallion:ro
     working_dir: /home/jovyan/notebooks
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8889/api"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
     networks:
       - lakehouse-network
 

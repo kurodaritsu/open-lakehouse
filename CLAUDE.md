@@ -4,11 +4,11 @@ You are helping with **open-lakehouse**, a composable OSS lakehouse demo platfor
 
 ## Stack
 
-Spark 4.1 (Connect-first) · Kafka 3.6 · Airflow 3.1 · Delta 4.2 + Iceberg 1.10 (both extensions enabled) · Unity Catalog OSS 0.4.x · MLflow 3.13 · SeaweedFS (S3) · PostgreSQL.
+Spark 4.1 (Connect-first) · Kafka 3.6 · Airflow 3.1 · Delta 4.3 + Iceberg 1.10 (both extensions enabled) · Unity Catalog OSS 0.5.0 · MLflow 3.14 · SeaweedFS (S3) · PostgreSQL.
 
 Catalogs (verified — see `.claude/skills/unity-catalog-oss/`):
 - `unity.<schema>.<table>` — Unity Catalog OSS via its Spark connector. **Delta only. Primary write path.**
-- `iceberg.<schema>.<table>` — UC OSS Iceberg REST endpoint. **Read-only** — UC OSS 0.4.x exposes no Iceberg write endpoints.
+- `iceberg.<schema>.<table>` — UC OSS Iceberg REST endpoint. **Read-only** — UC OSS 0.5.0 exposes no Iceberg write endpoints (unchanged from 0.4.x — measured on both).
 - `spark_catalog.<schema>.<table>` — default catalog set to `DeltaCatalog`; path-based / local Delta.
 
 Runs locally via Docker Compose; deploys to AWS via `terraform/`. Optional Databricks-managed destination in `terraform-databricks/`.
@@ -63,11 +63,11 @@ For the full deterministic runbook, see `.claude/skills/lakehouse-lifecycle/star
 
 - Spark 4.1.0 (Scala 2.13, Java 21)
 - Iceberg 1.10.0
-- Delta 4.2.0 (4.0.x breaks on Spark 4.1 — ABI mismatch)
+- Delta 4.3.1 (ABI-verified on Spark 4.1/Java21 via I-02; required for catalog-managed Delta. 4.3.0 NPEs through the UC connector — use 4.3.1; 4.0.x breaks — ABI mismatch)
 - Airflow 3.1.6
-- Unity Catalog OSS 0.4.1 (`newfrontdocker/unitycatalog:v0.4.1`)
-- Unity Catalog Spark connector 0.3.0
-- MLflow 3.13 (image base `ghcr.io/mlflow/mlflow:v3.13.0-full`)
+- Unity Catalog OSS 0.5.0 (`unitycatalog/unitycatalog:v0.5.0` — official image; catalog-managed Delta. v0.5.1 has no container yet)
+- Unity Catalog Spark connector family 0.5.x: `unitycatalog-spark_2.13` 0.4.1 (newest published) + `unitycatalog-client` 0.5.1 + `unitycatalog-hadoop` 0.5.1 (this set unlocks catalog-managed Delta on Delta 4.3.1)
+- MLflow 3.14 (image base `ghcr.io/mlflow/mlflow:v3.14.0-full`)
 - AWS SDK v2 2.24.6 (exact, for Hadoop 3.4.1 compatibility)
 
 ## Ports
