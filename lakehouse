@@ -154,23 +154,27 @@ preflight_checks() {
 
     echo -e "\n${YELLOW}Running preflight checks...${NC}"
 
-    # Check PostgreSQL connection
+    # Check PostgreSQL. Storage is now a Compose service that `start storage`
+    # bootstraps, so a COLD preflight must NOT demand it already be up (Bugbot
+    # #157) — "not running yet" is a hint, not an error. When it IS up, probe it
+    # via pg_psql (host client if present, else a version-matched dockerized
+    # client — never a bare host `psql`, Bugbot #164). Only probe deeper when the
+    # port is actually listening, so a cold preflight never pulls a client image.
     if [ "$check_postgres" = true ]; then
-        local pg_user="${POSTGRES_USER:-postgres}"
-        local pg_pass="${POSTGRES_PASSWORD:-}"
-        local pg_host="${POSTGRES_HOST:-localhost}"
-        pg_host="${pg_host/host.docker.internal/localhost}"
-
-        if PGPASSWORD="$pg_pass" psql -h "$pg_host" -U "$pg_user" -d iceberg_catalog -c "SELECT 1;" >/dev/null 2>&1; then
+        local pg_port="${POSTGRES_PORT:-5432}"
+        if ! nc -z localhost "$pg_port" 2>/dev/null; then
+            echo -e "   ${YELLOW}-${NC} PostgreSQL not running yet (OK for a cold preflight)"
+            echo -e "   ${YELLOW}→ It will be started by: ./lakehouse start storage (or start all)${NC}"
+        elif pg_psql -d iceberg_catalog -c "SELECT 1;" >/dev/null 2>&1; then
             echo -e "   ${GREEN}✓${NC} PostgreSQL connection OK"
         else
-            echo -e "   ${RED}✗${NC} PostgreSQL connection failed"
-            echo -e "   ${YELLOW}→ Check credentials in .env and ensure PostgreSQL is running${NC}"
-            has_errors=1
+            echo -e "   ${YELLOW}!${NC} PostgreSQL is listening on $pg_port but the auth/db check failed"
+            echo -e "   ${YELLOW}→ Check POSTGRES_USER/PASSWORD in .env; iceberg_catalog is created by 'start storage'${NC}"
         fi
     fi
 
-    # Check SeaweedFS S3 endpoint
+    # Check SeaweedFS S3 endpoint. Same cold-preflight rule as PostgreSQL: absent
+    # is a hint, not a blocker (Bugbot #157).
     if [ "$check_seaweedfs" = true ]; then
         local s3_endpoint="${S3_ENDPOINT:-http://localhost:8333}"
         s3_endpoint="${s3_endpoint/host.docker.internal/localhost}"
@@ -178,9 +182,8 @@ preflight_checks() {
         if curl -s --connect-timeout 5 "$s3_endpoint" > /dev/null 2>&1; then
             echo -e "   ${GREEN}✓${NC} SeaweedFS S3 endpoint OK"
         else
-            echo -e "   ${RED}✗${NC} SeaweedFS S3 endpoint not responding ($s3_endpoint)"
-            echo -e "   ${YELLOW}→ Ensure SeaweedFS is running${NC}"
-            has_errors=1
+            echo -e "   ${YELLOW}-${NC} SeaweedFS S3 endpoint not running yet (OK for a cold preflight)"
+            echo -e "   ${YELLOW}→ It will be started by: ./lakehouse start storage (or start all)${NC}"
         fi
     fi
 
@@ -331,6 +334,50 @@ wait_for_services() {
         wait_for_service "Spark Master" "nc -z localhost $spark_port" 30
         wait_for_service "Spark UI" "curl -s http://localhost:$(get_spark_ui_port) >/dev/null" 30
     fi
+}
+
+# Storage (PostgreSQL + SeaweedFS) is deliberately UNSCOPED — one shared instance
+# on fixed host ports with FIXED container names: docker-compose-storage.yml uses
+# `container_name: postgres` / `seaweedfs`, `overlay_set_compose_args storage` uses
+# the base file only, and init-storage.sh defaults POSTGRES_CONTAINER=postgres. Its
+# container names must therefore NOT pass through resolve_container_name — under an
+# active overlay that would append the run suffix (`postgres-<runid>`) and point
+# docker exec/logs/ps at a container that is never created, breaking `start storage`
+# / `start all` / `start mlflow` / `start airflow`.
+get_storage_postgres_container()  { echo "postgres"; }
+get_storage_seaweedfs_container() { echo "seaweedfs"; }
+
+# Wait until the Composed PostgreSQL is actually accepting connections — health,
+# not merely an open TCP port (`nc -z` passes before the server is ready). Probes
+# pg_isready INSIDE the postgres container, so no host psql client is needed.
+#
+# Each service is its own compose file and `postgres` lives only in
+# docker-compose-storage.yml, so a cross-file `depends_on: postgres` would make a
+# plain `docker compose -f docker-compose-mlflow.yml up` fail with "undefined
+# service postgres". This CLI-side gate gives the same "don't start until Postgres
+# is healthy" guarantee while keeping every compose file independently runnable.
+# Returns non-zero if the postgres container isn't running or never becomes ready.
+wait_for_postgres_ready() {
+    local max_attempts=${1:-60}
+    local ctr
+    ctr=$(get_storage_postgres_container)
+    if ! is_container_running "$ctr"; then
+        echo -e "   ${RED}✗${NC} PostgreSQL container ($ctr) is not running"
+        echo -e "   ${YELLOW}→ Start storage first: ./lakehouse start storage (or ./lakehouse start all)${NC}"
+        return 1
+    fi
+    local attempt=1
+    while [ $attempt -le "$max_attempts" ]; do
+        if docker exec "$ctr" pg_isready -U "${POSTGRES_USER:-postgres}" -d postgres >/dev/null 2>&1; then
+            echo -e "   ${GREEN}✓${NC} PostgreSQL ready"
+            return 0
+        fi
+        printf "   Waiting for PostgreSQL... (%d/%d)\r" "$attempt" "$max_attempts"
+        sleep 1
+        ((attempt++))
+    done
+    echo -e "   ${RED}✗${NC} PostgreSQL did not become ready (timeout after ${max_attempts}s)"
+    return 1
 }
 
 # Fixed Spark 4.1 constants (this repo is Spark-4.1-only).
@@ -502,9 +549,9 @@ cmd_status_human() {
     mlflow_ct=$(resolve_container_name mlflow)
 
     echo -e "\n${YELLOW}Storage (SeaweedFS + PostgreSQL):${NC}"
-    check_container "$(resolve_container_name postgres)" || true
+    check_container "$(get_storage_postgres_container)" || true
     check_service postgres "5432" "PostgreSQL"
-    check_container "$(resolve_container_name seaweedfs)" || true
+    check_container "$(get_storage_seaweedfs_container)" || true
     check_service seaweedfs "8333" "SeaweedFS S3"
 
     echo -e "\n${YELLOW}Unity Catalog:${NC}"
@@ -658,14 +705,14 @@ check_ports_for_service() {
 
     case $service in
         storage)
-            if ! check_port_available "5432" "$(resolve_container_name postgres)"; then
+            if ! check_port_available "5432" "$(get_storage_postgres_container)"; then
                 echo -e "  ${RED}✗${NC} Port 5432 (PostgreSQL) blocked by another process"
                 has_conflicts=1
             else
                 echo -e "  ${GREEN}✓${NC} Port 5432 (PostgreSQL) available"
             fi
 
-            if ! check_port_available "8333" "$(resolve_container_name seaweedfs)"; then
+            if ! check_port_available "8333" "$(get_storage_seaweedfs_container)"; then
                 echo -e "  ${RED}✗${NC} Port 8333 (SeaweedFS S3) blocked by another process"
                 has_conflicts=1
             else
@@ -707,13 +754,21 @@ cmd_start() {
             echo -e "${YELLOW}Starting storage (SeaweedFS + PostgreSQL)...${NC}"
             overlay_set_compose_args storage || return 1
             docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d
-            wait_for_service "PostgreSQL" "nc -z localhost 5432" 60
+            # pg_isready (not just `nc -z`) so the bootstrap below only runs once
+            # PostgreSQL truly accepts connections.
+            wait_for_postgres_ready 60 || return 1
             wait_for_service "SeaweedFS S3" "nc -z localhost 8333" 60
             echo -e "${YELLOW}Bootstrapping buckets / prefixes / databases...${NC}"
+            # Fail the start if bootstrap fails: init-storage.sh now needs no host
+            # aws/psql (dockerized fallbacks + `docker exec` for psql), so a failure
+            # here is a real error, not a missing-tool warning. Continuing would
+            # bring the rest of the stack up against an un-bootstrapped store.
             if bash scripts/tools/init-storage.sh; then
                 echo -e "${GREEN}Storage ready.${NC}"
             else
-                echo -e "${YELLOW}!${NC} init-storage.sh did not complete — run it manually once aws/psql are available"
+                echo -e "${RED}✗${NC} init-storage.sh failed — storage was NOT bootstrapped"
+                echo -e "${YELLOW}→ Check the output above; ensure Docker is reachable, then re-run './lakehouse start storage'${NC}"
+                return 1
             fi
             ;;
     esac
@@ -753,6 +808,10 @@ cmd_start() {
     case $service in
         airflow)
             echo -e "${YELLOW}Starting Airflow...${NC}"
+            # airflow-init creates its DB in the Composed PostgreSQL and the
+            # scheduler/webserver need it too — gate on Postgres health so they
+            # don't crash-loop against an absent metastore.
+            wait_for_postgres_ready 60 || return 1
             mkdir -p logs/airflow
             overlay_set_compose_args airflow || return 1
             docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d --build
@@ -765,6 +824,9 @@ cmd_start() {
     case $service in
         mlflow)
             echo -e "${YELLOW}Starting MLflow...${NC}"
+            # The MLflow entrypoint provisions its role + DB in the Composed
+            # PostgreSQL, so gate on Postgres health (else it crash-loops).
+            wait_for_postgres_ready 60 || return 1
             overlay_set_compose_args mlflow || return 1
             docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d
             wait_for_service "MLflow" "curl -s http://localhost:5000/health" 60
@@ -879,8 +941,8 @@ cmd_logs() {
             echo -e "${YELLOW}Logs for $(resolve_container_name spark-connect-41):${NC}"
             docker logs -f "$(resolve_container_name spark-connect-41)"
             ;;
-        postgres|postgresql) docker logs -f "$(resolve_container_name postgres)" ;;
-        seaweedfs|s3)     docker logs -f "$(resolve_container_name seaweedfs)" ;;
+        postgres|postgresql) docker logs -f "$(get_storage_postgres_container)" ;;
+        seaweedfs|s3)     docker logs -f "$(get_storage_seaweedfs_container)" ;;
         kafka)            docker logs -f "$(resolve_container_name kafka)" ;;
         zookeeper)        docker logs -f "$(resolve_container_name zookeeper)" ;;
         unity-catalog|uc) docker logs -f "$(resolve_container_name unity-catalog)" ;;

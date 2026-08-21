@@ -162,9 +162,16 @@ def test_i09_mlflow_314_run_artifact_in_s3():
         "    mlflow.log_param('cp','3'); mlflow.log_metric('acc',0.99)\n"
         "    p=os.path.join(tempfile.mkdtemp(),'art.txt'); open(p,'w').write('cp3')\n"
         "    mlflow.log_artifact(p)\n"
-        "s3=boto3.client('s3',endpoint_url='http://seaweedfs:8333',"
-        "aws_access_key_id='lakehouse_s3',aws_secret_access_key='lakehouse_s3_secret')\n"
-        "keys=[o['Key'] for o in s3.list_objects_v2(Bucket='lakehouse',"
+        # Read S3 endpoint/creds/bucket from the mlflow container's own env rather
+        # than baking a credential pair — the container is configured from the
+        # unified demo creds, so this stays correct if they ever change.
+        "ep=os.environ.get('MLFLOW_S3_ENDPOINT_URL','http://seaweedfs:8333')\n"
+        "ak=os.environ.get('AWS_ACCESS_KEY_ID') or os.environ.get('S3_ACCESS_KEY','lakehouse_s3')\n"
+        "sk=os.environ.get('AWS_SECRET_ACCESS_KEY') or os.environ.get('S3_SECRET_KEY','lakehouse_s3_secret')\n"
+        "dest=os.environ.get('MLFLOW_ARTIFACTS_DESTINATION','s3://lakehouse/mlflow-artifacts')\n"
+        "bkt=dest.split('/')[2]\n"
+        "s3=boto3.client('s3',endpoint_url=ep,aws_access_key_id=ak,aws_secret_access_key=sk)\n"
+        "keys=[o['Key'] for o in s3.list_objects_v2(Bucket=bkt,"
         "Prefix='mlflow-artifacts/').get('Contents',[]) if rid in o['Key']]\n"
         "c=mlflow.tracking.MlflowClient()\n"
         "r=c.get_run(rid); arts=[a.path for a in c.list_artifacts(rid)]\n"

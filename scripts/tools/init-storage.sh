@@ -10,7 +10,9 @@
 # Targets the effective endpoints from the environment (.env is sourced if present),
 # defaulting to the published host ports for the default (non-overlay) path.
 #
-# Requires: aws CLI (S3), psql (PostgreSQL) on PATH.
+# No host tooling required: S3 uses a host `aws` if present, else a dockerized
+# aws-cli; PostgreSQL runs psql INSIDE the postgres container via `docker exec`.
+# Requires only a reachable Docker daemon.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -25,8 +27,10 @@ fi
 
 S3_ENDPOINT="${S3_ENDPOINT:-http://localhost:8333}"
 S3_BUCKET="${S3_BUCKET:-lakehouse}"
-S3_ACCESS_KEY="${S3_ACCESS_KEY:-admin}"
-S3_SECRET_KEY="${S3_SECRET_KEY:-admin_password}"
+# Unified demo credential pair — must match docker-compose-storage.yml defaults,
+# .env.example, and the test fallbacks so a fresh clone bootstraps consistently.
+S3_ACCESS_KEY="${S3_ACCESS_KEY:-lakehouse_s3}"
+S3_SECRET_KEY="${S3_SECRET_KEY:-lakehouse_s3_secret}"
 
 POSTGRES_HOST="${POSTGRES_HOST:-localhost}"
 POSTGRES_PORT="${POSTGRES_PORT:-5432}"
@@ -49,21 +53,42 @@ MANAGED_DATABASES=(iceberg_catalog)
 log()  { printf '  %s\n' "$*"; }
 ok()   { printf '  \033[0;32m✓\033[0m %s\n' "$*"; }
 
+# AWS CLI wrapper: prefer a host `aws`; fall back to a dockerized aws-cli so
+# `start storage` works with no host aws install (same pattern as pg_psql / aws_s3
+# in ./lakehouse). The dockerized client reaches the host-published S3 port via the
+# host-gateway, so a localhost/loopback endpoint is rewritten to
+# host.docker.internal. Override the image with LAKEHOUSE_AWSCLI_IMAGE.
+# Pinned aws-cli 2.24.6 (not :latest) for reproducibility — mirrors the repo's
+# AWS SDK v2 2.24.6 pin (see CLAUDE.md version pins).
+AWSCLI_IMAGE="${LAKEHOUSE_AWSCLI_IMAGE:-amazon/aws-cli:2.24.6}"
+awscli() {
+  if command -v aws >/dev/null 2>&1; then
+    AWS_ACCESS_KEY_ID="${S3_ACCESS_KEY}" \
+    AWS_SECRET_ACCESS_KEY="${S3_SECRET_KEY}" \
+    AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}" \
+      aws --endpoint-url "${S3_ENDPOINT}" "$@"
+  else
+    local dep="${S3_ENDPOINT//127.0.0.1/host.docker.internal}"
+    dep="${dep//localhost/host.docker.internal}"
+    docker run --rm --add-host=host.docker.internal:host-gateway \
+      -e AWS_ACCESS_KEY_ID="${S3_ACCESS_KEY}" \
+      -e AWS_SECRET_ACCESS_KEY="${S3_SECRET_KEY}" \
+      -e AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}" \
+      "${AWSCLI_IMAGE}" \
+      --endpoint-url "${dep}" "$@"
+  fi
+}
+
 # --- S3 -------------------------------------------------------------------
 init_s3() {
   echo "SeaweedFS S3 (${S3_ENDPOINT}, bucket ${S3_BUCKET}):"
-  export AWS_ACCESS_KEY_ID="${S3_ACCESS_KEY}"
-  export AWS_SECRET_ACCESS_KEY="${S3_SECRET_KEY}"
-  export AWS_DEFAULT_REGION="${AWS_DEFAULT_REGION:-us-east-1}"
-
-  local aws=(aws --endpoint-url "${S3_ENDPOINT}")
 
   # SeaweedFS opens the S3 TCP port a beat before the gateway accepts API calls
   # (a fresh start can briefly close the connection). Wait for real readiness
   # before bootstrapping, so `start storage` is deterministic.
   local i
   for i in 1 2 3 4 5 6 7 8; do
-    if "${aws[@]}" s3 ls >/dev/null 2>&1; then
+    if awscli s3 ls >/dev/null 2>&1; then
       break
     fi
     if [ "${i}" -eq 8 ]; then
@@ -74,10 +99,10 @@ init_s3() {
   done
 
   # Bucket (idempotent): head-bucket succeeds if it already exists.
-  if "${aws[@]}" s3api head-bucket --bucket "${S3_BUCKET}" >/dev/null 2>&1; then
+  if awscli s3api head-bucket --bucket "${S3_BUCKET}" >/dev/null 2>&1; then
     log "bucket ${S3_BUCKET} already exists"
   else
-    "${aws[@]}" s3api create-bucket --bucket "${S3_BUCKET}" >/dev/null
+    awscli s3api create-bucket --bucket "${S3_BUCKET}" >/dev/null
     ok "created bucket ${S3_BUCKET}"
   fi
 
@@ -85,7 +110,7 @@ init_s3() {
   local p key
   for p in "${WAREHOUSE_PREFIXES[@]}"; do
     key="warehouse/${p}/"
-    "${aws[@]}" s3api put-object --bucket "${S3_BUCKET}" --key "${key}" >/dev/null
+    awscli s3api put-object --bucket "${S3_BUCKET}" --key "${key}" >/dev/null
     ok "prefix s3://${S3_BUCKET}/${key}"
   done
 }

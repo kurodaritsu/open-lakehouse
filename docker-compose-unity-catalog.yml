@@ -13,8 +13,10 @@
 # Usage:
 #   docker compose -f docker-compose-unity-catalog.yml up -d
 #
-# Then configure Spark to use Unity Catalog REST endpoint:
-#   spark.sql.catalog.iceberg.uri = http://localhost:8080/api/2.1/unity-catalog/iceberg
+# Then configure Spark to use the Unity Catalog REST endpoint. Spark runs on the
+# bridge, so it uses the in-network service name (host 8081 -> container 8080):
+#   spark.sql.catalog.iceberg.uri = http://unity-catalog:8080/api/2.1/unity-catalog/iceberg
+# (From the host, the same endpoint is http://localhost:8081/api/2.1/unity-catalog/iceberg.)
 #
 # Capabilities relied on here:
 #   - Catalog-managed Delta: a catalog with a storage_root assigns table locations,

@@ -37,15 +37,32 @@ done
 
 echo "-> 2. seed input dataset"
 docker cp "$(dirname "$0")" "${MASTER}:/tmp/sdp-medallion" >/dev/null
-docker exec "${MASTER}" /opt/spark/bin/spark-submit /tmp/sdp-medallion/seed.py 2>&1 | grep -E "seed complete" || true
+# The seed must actually complete — a silent `|| true` here would let the pipeline
+# run against missing input and fail confusingly downstream.
+seed_out="$(docker exec "${MASTER}" /opt/spark/bin/spark-submit /tmp/sdp-medallion/seed.py 2>&1)" || true
+if ! grep -qE "seed complete" <<<"${seed_out}"; then
+  echo "   x seed did not complete — aborting:" >&2
+  echo "${seed_out}" | tail -20 >&2
+  exit 1
+fi
+echo "   seed complete"
 
 echo "-> 3. ensure spark-pipelines deps in ${MASTER}"
-docker exec "${MASTER}" pip install --quiet --index-url "${PIP_INDEX_URL}" \
-  --target /tmp/pylibs pyyaml pandas pyarrow grpcio grpcio-status protobuf zstandard 2>/dev/null || true
+# Fail loudly if the deps don't install — otherwise spark-pipelines dies later with
+# a confusing missing-module error (unlike the UC create/delete calls below, this is
+# not an expected-409/404 no-op).
+if ! docker exec "${MASTER}" pip install --quiet --index-url "${PIP_INDEX_URL}" \
+  --target /tmp/pylibs pyyaml pandas pyarrow grpcio grpcio-status protobuf zstandard; then
+  echo "   x failed to install spark-pipelines deps into ${MASTER} — aborting" >&2
+  exit 1
+fi
 
 echo "-> 4. run the pipeline (spark-pipelines, spark.master stripped)"
 docker stop "${CONNECT}" >/dev/null 2>&1 || true
-trap 'docker start "${CONNECT}" >/dev/null 2>&1 || true' EXIT
+# Restore Connect on ANY exit — success, error (set -e), or interrupt (Ctrl-C /
+# TERM). SDP golden rule: never leave the Connect server down. (SIGKILL can't be
+# trapped; nothing can help there.)
+trap 'docker start "${CONNECT}" >/dev/null 2>&1 || true' EXIT INT TERM
 docker exec "${MASTER}" sh -c '
   mkdir -p /tmp/pconf
   grep -v "^spark.master " /opt/spark/conf/spark-defaults.conf > /tmp/pconf/spark-defaults.conf

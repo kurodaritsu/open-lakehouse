@@ -17,7 +17,10 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STORAGE_COMPOSE = REPO_ROOT / "docker-compose-storage.yml"
-UC_PROPS = REPO_ROOT / "config" / "unity-catalog" / "server.properties"
+# server.properties is gitignored (developer-local), so on a fresh CI clone only
+# the committed .example exists — assert the U-17 invariants against that
+# (the CLI copies it to server.properties on first `start unity-catalog`).
+UC_PROPS = REPO_ROOT / "config" / "unity-catalog" / "server.properties.example"
 CLI = REPO_ROOT / "lakehouse"
 INIT_SCRIPT = REPO_ROOT / "scripts" / "tools" / "init-storage.sh"
 

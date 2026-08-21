@@ -33,8 +33,9 @@ services:
       MLFLOW_PG_DB: "${MLFLOW_PG_DB:-mlflow}"
       # Artifact storage: SeaweedFS via S3 (bridge service name)
       MLFLOW_ARTIFACTS_DESTINATION: "s3://lakehouse/mlflow-artifacts"
-      AWS_ACCESS_KEY_ID: "${S3_ACCESS_KEY:-admin}"
-      AWS_SECRET_ACCESS_KEY: "${S3_SECRET_KEY:-admin_password}"
+      # Unified demo credential pair (see docker-compose-storage.yml).
+      AWS_ACCESS_KEY_ID: "${S3_ACCESS_KEY:-lakehouse_s3}"
+      AWS_SECRET_ACCESS_KEY: "${S3_SECRET_KEY:-lakehouse_s3_secret}"
       MLFLOW_S3_ENDPOINT_URL: "http://seaweedfs:8333"
       # AI Gateway config
       MLFLOW_GATEWAY_CONFIG: "/config/gateway-config.yml"

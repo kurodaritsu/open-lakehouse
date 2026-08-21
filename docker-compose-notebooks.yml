@@ -6,7 +6,8 @@
 #
 # Usage:
 #   docker compose -f docker-compose-notebooks.yml up -d --build
-#   # Open http://localhost:8889 (no token required)
+#   # Open http://localhost:8889/?token=<JUPYTER_TOKEN> (a token is REQUIRED — D5;
+#   # set JUPYTER_TOKEN in .env, or an empty value mints a random one, never open)
 #   docker compose -f docker-compose-notebooks.yml down
 #
 # Notebooks run Spark in local mode. For cluster execution, connect to the

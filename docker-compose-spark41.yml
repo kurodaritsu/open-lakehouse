@@ -3,11 +3,15 @@
 #
 # Bridge conversion, porting terraform/spark-ecs/docker/entrypoint.sh (§1.8):
 # the standalone master BINDS AND ADVERTISES its --host, so it must be this
-# container's own bridge IP (hostname -i), NEVER 0.0.0.0 — otherwise a worker
-# receives 0.0.0.0 as the master address and RPC silently fails. Workers and the
-# Connect server address the master by its DNS name (spark-master-41) on the
-# bridge; each also exports SPARK_LOCAL_IP so master<->worker<->executor RPC and
-# the Connect driver advertise reachable addresses.
+# container's own bridge IP, NEVER 0.0.0.0 — otherwise a worker receives 0.0.0.0
+# as the master address and RPC silently fails. The IP is resolved with
+# `hostname -i | tr ' ' '\n' | grep -vE '^127\.' | head -1` (the same
+# non-loopback filter the ECS entrypoint uses): a bare `hostname -i | cut` can
+# hand back 127.0.1.1 first, which would advertise loopback and break RPC.
+# Workers and the Connect server address the master by its DNS name
+# (spark-master-41) on the bridge; each also exports SPARK_LOCAL_IP so
+# master<->worker<->executor RPC and the Connect driver advertise reachable
+# addresses.
 #
 # Client invariant: Connect publishes 15002 so sc://localhost:15002 keeps working
 # unchanged from the host (Golden Rule #3).
@@ -36,7 +40,7 @@ services:
         user: root
     command: >
       bash -c "
-        export SPARK_LOCAL_IP=$$(hostname -i | cut -d' ' -f1);
+        export SPARK_LOCAL_IP=$$(hostname -i | tr ' ' '\n' | grep -vE '^127\.' | head -1);
         export SPARK_PUBLIC_DNS=$$SPARK_LOCAL_IP;
         echo \"spark-master binding/advertising $$SPARK_LOCAL_IP:7078\";
         /opt/spark/sbin/start-master.sh --host $$SPARK_LOCAL_IP --port 7078 --webui-port 8082 &&
@@ -67,7 +71,7 @@ services:
         user: root
     command: >
       bash -c "
-        export SPARK_LOCAL_IP=$$(hostname -i | cut -d' ' -f1);
+        export SPARK_LOCAL_IP=$$(hostname -i | tr ' ' '\n' | grep -vE '^127\.' | head -1);
         export SPARK_PUBLIC_DNS=$$SPARK_LOCAL_IP;
         sleep 5 &&
         /opt/spark/sbin/start-worker.sh spark://spark-master-41:7078 --webui-port 8083 &&
@@ -103,7 +107,7 @@ services:
       - spark-worker-41
     command: >
       bash -c "
-        export SPARK_LOCAL_IP=$$(hostname -i | cut -d' ' -f1);
+        export SPARK_LOCAL_IP=$$(hostname -i | tr ' ' '\n' | grep -vE '^127\.' | head -1);
         export SPARK_PUBLIC_DNS=$$SPARK_LOCAL_IP;
         sleep 10 &&
         /opt/spark/sbin/start-connect-server.sh
