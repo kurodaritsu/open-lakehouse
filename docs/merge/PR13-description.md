@@ -150,3 +150,7 @@ idempotently against unscoped `postgres`/`seaweedfs`. `./lakehouse test` is gree
   airflow `network_mode: host` assertion from before the bridge conversion, moved
   script paths, `admin/admin` hardcoded S3 creds, missing DAG files). Batched with
   the deferred doc/test hygiene, not fixed here.
+
+---
+
+This pull request and its description were written by Isaac.
