@@ -1,0 +1,5 @@
+[default]
+s3 =
+    endpoint_url = https://__MINIO_ENDPOINT__
+    signature_version = s3v4
+    addressing_style = path
