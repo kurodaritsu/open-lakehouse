@@ -112,7 +112,7 @@ export default function Dashboard() {
 
   return (
     <div className="mx-auto max-w-6xl space-y-8">
-      <div>
+      <div className="hero-glow -mx-8 -mt-8 px-8 pb-6 pt-8">
         <p className="eyebrow">Open Lakehouse</p>
         <h1 className="text-3xl font-bold tracking-tight text-white">Platform Dashboard</h1>
         <p className="mt-1 text-sm text-slate-400">

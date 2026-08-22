@@ -44,6 +44,12 @@
     background-clip: text;
     color: transparent;
   }
+  /* Soft purple + teal radial wash behind the page hero, as on openlakehouse.io. */
+  .hero-glow {
+    background-image:
+      radial-gradient(120% 80% at 50% 0%, rgba(106, 31, 111, 0.45), rgba(0, 0, 0, 0) 60%),
+      radial-gradient(90% 70% at 82% 8%, rgba(5, 140, 173, 0.22), rgba(0, 0, 0, 0) 55%);
+  }
   .table-header {
     @apply bg-surface-dark px-4 py-3 text-left text-xs font-medium uppercase tracking-wider text-slate-400;
   }
