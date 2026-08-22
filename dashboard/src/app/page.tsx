@@ -68,7 +68,7 @@ const services: Omit<ServiceHealth, "status">[] = [
 ];
 
 const features = [
-  { icon: Database, label: "Unity Catalog", detail: "Three-level namespace governance", url: "http://localhost:8081", port: 8081 },
+  { icon: Database, label: "Unity Catalog", detail: "Three-level namespace governance", url: "http://localhost:8081/api/2.1/unity-catalog/catalogs", port: 8081 },
   { icon: Layers, label: "Delta Lake + Iceberg", detail: "ACID transactions, time travel", url: null, port: null },
   { icon: FlaskConical, label: "MLflow", detail: "Experiments, models, observability", url: "http://localhost:5000", port: 5000 },
   { icon: Cpu, label: "Spark 4.1", detail: "Connect-first compute (sc://localhost:15002)", url: "http://localhost:8082", port: 8082 },
@@ -278,7 +278,7 @@ Delta Sharing (external sharing, port 8443 — optional)`}
             { label: "Jupyter Notebook", url: "http://localhost:8889", port: 8889 },
             { label: "Spark UI", url: "http://localhost:8082", port: 8082 },
             { label: "MLflow UI", url: "http://localhost:5000", port: 5000 },
-            { label: "Unity Catalog API", url: "http://localhost:8081", port: 8081 },
+            { label: "Unity Catalog API", url: "http://localhost:8081/api/2.1/unity-catalog/catalogs", port: 8081 },
             { label: "Airflow UI", url: "http://localhost:8085", port: 8085 },
           ].map((link) => (
             <a
