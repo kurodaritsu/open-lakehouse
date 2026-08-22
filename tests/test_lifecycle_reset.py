@@ -447,6 +447,7 @@ class TestU59InventoryExcludesOverlays:
             "spark-logs",
             "postgres-data",
             "seaweedfs-data",
+            "delta-sharing-certs",
         }
 
 

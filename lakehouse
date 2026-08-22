@@ -1583,6 +1583,11 @@ reset_volume_mode() {
         # services ARE quiesced (uc-data, mlflow-data, spark-data) remain removable.
         postgres-data)         echo "never" ;;
         seaweedfs-data)        echo "never" ;;
+        # delta-sharing-certs holds only the self-signed cert, regenerated at
+        # startup. delta-sharing is an opt-in service reset does not quiesce, so
+        # (like the storage volumes) never `docker volume rm` it — a wipe would
+        # fail "in use" when sharing is up, and is pointless (the cert regenerates).
+        delta-sharing-certs)   echo "never" ;;
         spark-data|spark-logs) echo "data,all" ;;      # job scratch + event logs
         *)                     echo "data,all" ;;      # default: data-plane scratch
     esac
