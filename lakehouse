@@ -599,6 +599,7 @@ cmd_status_human() {
     echo "  Unity Catalog:   docker-compose-unity-catalog.yml"
     echo "  Airflow:         docker-compose-airflow.yml"
     echo "  MLflow:          docker-compose-mlflow.yml"
+    echo "  Delta Sharing:   docker-compose-sharing.yml"
     echo "  Spark conf:      config/spark/spark-defaults.conf"
 }
 
@@ -926,6 +927,19 @@ cmd_stop() {
             echo -e "${YELLOW}Stopping notebooks (Jupyter)...${NC}"
             overlay_set_compose_args notebooks || return 1
             docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down
+            ;;
+    esac
+
+    case $service in
+        sharing)
+            # Internal arm for reset quiescence (reset_stop_services -> cmd_stop sharing).
+            # Delta Sharing's primary interface is `./lakehouse share`; this is
+            # deliberately NOT in `stop all` nor the usage list. Return early so it
+            # never reaches the shared valid-set below (keeping stop-all + usage as-is).
+            echo -e "${YELLOW}Stopping Delta Sharing...${NC}"
+            overlay_set_compose_args sharing || return 1
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down
+            return 0
             ;;
     esac
 
@@ -1860,6 +1874,10 @@ reset_running_services() {
     # it must be in the restart set too — else a running Jupyter is left stopped after
     # a successful reset. cmd_start now has a `notebooks` arm to bring it back.
     is_container_running "$(resolve_container_name jupyter)" && up="$up notebooks" || true
+    # Delta Sharing reads warehouse/sharing/ (and the whole warehouse prefix), so
+    # reset_quiesce stops it; include it in the restart set too. Restore is
+    # special-cased in reset_restore_services (no re-mint, no --build).
+    is_container_running "$(resolve_container_name delta-sharing)" && up="$up sharing" || true
     echo "$up"
     return 0
 }
@@ -1875,6 +1893,7 @@ quiesce_containers_for() {
         mlflow)        resolve_container_name mlflow ;;
         airflow)       echo "$(resolve_container_name airflow-webserver) $(resolve_container_name airflow-scheduler) $(resolve_container_name airflow-triggerer)" ;;
         notebooks)     resolve_container_name jupyter ;;
+        sharing)       resolve_container_name delta-sharing ;;
     esac
 }
 
@@ -1904,9 +1923,9 @@ reset_stop_services() {
 # registrations are cleared via REST), so UC is not in the --data set.
 reset_quiesce() {
     case "$1" in
-        data)     reset_stop_services spark kafka mlflow airflow notebooks ;;
-        metadata) reset_stop_services unity-catalog mlflow airflow notebooks ;;
-        all)      reset_stop_services spark kafka unity-catalog mlflow airflow notebooks ;;
+        data)     reset_stop_services spark kafka mlflow airflow notebooks sharing ;;
+        metadata) reset_stop_services unity-catalog mlflow airflow notebooks sharing ;;
+        all)      reset_stop_services spark kafka unity-catalog mlflow airflow notebooks sharing ;;
     esac
 }
 
@@ -1914,6 +1933,13 @@ reset_quiesce() {
 reset_restore_services() {
     local s
     for s in $1; do
+        # Delta Sharing restarts WITHOUT minting a new token or rebuilding —
+        # share_restore reuses the existing token (env / profile) and `up -d` only.
+        if [ "$s" = "sharing" ]; then
+            echo -e "${YELLOW}Restarting sharing...${NC}"
+            share_restore >/dev/null 2>&1 || echo -e "  ${YELLOW}!${NC} delta-sharing did not come back cleanly; check ./lakehouse status"
+            continue
+        fi
         echo -e "${YELLOW}Restarting ${s}...${NC}"
         cmd_start "$s" >/dev/null 2>&1 || echo -e "  ${YELLOW}!${NC} ${s} did not come back cleanly; check ./lakehouse status"
     done
@@ -3006,9 +3032,30 @@ share_endpoint() { echo "https://localhost:${DELTA_SHARING_PORT:-8443}/delta-sha
 
 # Read the bearer token from the running delta-sharing container (the source of
 # truth when `share start` minted a random one that isn't in the caller's env).
+# Works because the CLI start path injects DELTA_SHARING_TOKEN via Compose, so it
+# is a real container env var visible to printenv.
 share_container_token() {
     docker exec "$(resolve_container_name delta-sharing)" \
         printenv DELTA_SHARING_TOKEN 2>/dev/null || true
+}
+
+# Restart delta-sharing after a reset WITHOUT minting a new token or rebuilding
+# (reset_restore_services special-cases this). Reuse DELTA_SHARING_TOKEN from the
+# env, else the bearerToken from $LAKEHOUSE_SHARING_PROFILE; if neither exists,
+# skip — letting the entrypoint mint a token the host can't reproduce would strand
+# `share profile`.
+share_restore() {
+    local token="${DELTA_SHARING_TOKEN:-}"
+    if [ -z "$token" ] && [ -f "$SHARING_PROFILE" ]; then
+        token=$(python3 -c "import json;print(json.load(open('$SHARING_PROFILE')).get('bearerToken',''))" 2>/dev/null || true)
+    fi
+    if [ -z "$token" ]; then
+        echo -e "  ${YELLOW}!${NC} delta-sharing not restarted: no DELTA_SHARING_TOKEN and no profile token to reuse — start it with './lakehouse share start'." >&2
+        return 0
+    fi
+    export DELTA_SHARING_TOKEN="$token"
+    overlay_set_compose_args sharing || return 1
+    docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d
 }
 
 share_write_profile() {
@@ -3137,8 +3184,8 @@ Services:
   spark          Apache Spark 4.1 cluster (ports 7078, UI 8082)
   kafka          Kafka 3.6 + Zookeeper
   airflow        Apache Airflow 3.1 (UI 8085)
-  unity-catalog  Unity Catalog OSS 0.4.x (REST API 8081)
-  mlflow         MLflow 3.1 (tracking 5000, AI gateway 5001)
+  unity-catalog  Unity Catalog OSS 0.5.0 (REST API 8081)
+  mlflow         MLflow 3.14 (tracking 5000, AI gateway 5001)
   delta-sharing  Delta Sharing server + re-signing proxy (HTTPS 8443) — via `share`, opt-in
   all            Spark + Kafka (start storage, unity-catalog, airflow, mlflow individually)
 
