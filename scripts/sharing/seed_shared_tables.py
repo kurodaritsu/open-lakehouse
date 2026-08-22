@@ -112,8 +112,18 @@ def main() -> int:
             df.write.format("delta")
             .mode("overwrite")
             .option("overwriteSchema", "true")
+            # checkpointInterval=1 so the very next commit writes a checkpoint.
+            .option("delta.checkpointInterval", "1")
             .save(location)
         )
+        # Force a second commit so a checkpoint (_last_checkpoint) is written. The
+        # Delta Sharing server's delta-format reader (Delta Kernel — used when a
+        # client such as Databricks sends `delta-sharing-capabilities:
+        # responseformat=delta`) treats a missing _last_checkpoint as fatal, and a
+        # fresh single-commit table has none. The parquet-format path tolerates it,
+        # but real consumers request delta. Re-writing the same rows is a no-op to
+        # the data but produces v1, which checkpoints.
+        df.write.format("delta").mode("overwrite").save(location)
         count = spark.read.format("delta").load(location).count()
         print(f"  seeded {name}: {count} rows -> {location}")
 
