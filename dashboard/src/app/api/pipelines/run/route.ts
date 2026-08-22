@@ -4,6 +4,7 @@
 import { NextRequest } from "next/server";
 import { appendRun, type RunHistoryEntry } from "@/lib/s3";
 import { requireEnv } from "@/lib/env";
+import { codeExecutionEnabled, codeExecutionDisabledResponse } from "@/lib/features";
 
 const JUPYTER_URL = () => process.env.JUPYTER_URL || "http://jupyter:8888";
 const JUPYTER_TOKEN = () => requireEnv("JUPYTER_TOKEN");
@@ -69,6 +70,9 @@ const SDP_CONF_LINES = [
 ];
 
 export async function POST(req: NextRequest) {
+  // D6 / T-3.8: running a pipeline shells out on the Jupyter terminal — disabled
+  // unless code-execution is explicitly enabled.
+  if (!codeExecutionEnabled()) return codeExecutionDisabledResponse();
   // Auto-release stale locks after 20 minutes (safety valve)
   if (pipelineLock && Date.now() - pipelineLockTime > 20 * 60 * 1000) {
     pipelineLock = false;

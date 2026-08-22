@@ -3,6 +3,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { requireEnv } from "@/lib/env";
+import { codeExecutionEnabled, codeExecutionDisabledResponse } from "@/lib/features";
 
 /**
  * SECURITY NOTE: This endpoint allows arbitrary Python code execution on the
@@ -158,6 +159,8 @@ function executeViaWebSocket(
 }
 
 export async function POST(req: NextRequest) {
+  // D6 / T-3.8: arbitrary-code execution is disabled unless explicitly enabled.
+  if (!codeExecutionEnabled()) return codeExecutionDisabledResponse();
   try {
     const body = await req.json();
     const { kernelId, code, timeoutMs } = body as {

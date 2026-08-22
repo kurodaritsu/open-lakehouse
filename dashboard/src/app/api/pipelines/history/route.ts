@@ -3,6 +3,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { getRunHistory, deleteRun, clearRunHistory } from "@/lib/s3";
+import { codeExecutionEnabled, codeExecutionDisabledResponse } from "@/lib/features";
 
 export async function GET() {
   try {
@@ -18,6 +19,8 @@ export async function GET() {
 }
 
 export async function DELETE(req: NextRequest) {
+  // D6 / T-3.8: mutating run history is disabled unless code-execution is on.
+  if (!codeExecutionEnabled()) return codeExecutionDisabledResponse();
   try {
     const { id } = await req.json().catch(() => ({ id: null }));
     if (id) {

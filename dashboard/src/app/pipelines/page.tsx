@@ -4,6 +4,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import CodeExecGuard from "@/components/code-exec-guard";
 import {
   Workflow,
   FileCode2,
@@ -252,7 +253,7 @@ function PipelineProgress({
   );
 }
 
-export default function PipelinesPage() {
+function PipelinesPageInner() {
   const [data, setData] = useState<PipelineData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1218,5 +1219,13 @@ export default function PipelinesPage() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function PipelinesPage() {
+  return (
+    <CodeExecGuard feature="Pipelines">
+      <PipelinesPageInner />
+    </CodeExecGuard>
   );
 }

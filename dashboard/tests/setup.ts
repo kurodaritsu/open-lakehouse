@@ -7,6 +7,11 @@
 
 import { vi } from "vitest";
 
+// Default the code-execution feature flag ON for tests so the gated routes reach
+// their real logic (path-traversal, validation). The dedicated feature-flag test
+// (feature_flags.test.ts) toggles it OFF per-case to assert the disabled path.
+process.env.DASHBOARD_ALLOW_CODE_EXECUTION = "true";
+
 // Mock global fetch for all tests
 global.fetch = vi.fn();
 

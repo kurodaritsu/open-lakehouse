@@ -15,15 +15,20 @@ import {
   BookOpen,
   ChevronLeft,
   ChevronRight,
+  type LucideIcon,
 } from "lucide-react";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 
-const nav = [
+type NavItem = { href: string; label: string; icon: LucideIcon; guarded?: boolean };
+
+// Items marked `guarded` drive code-execution features and are hidden unless
+// DASHBOARD_ALLOW_CODE_EXECUTION is on (D6 / T-3.8).
+const nav: NavItem[] = [
   { href: "/", label: "Dashboard", icon: LayoutDashboard },
   { href: "/catalog", label: "Catalog", icon: Database },
   { href: "/experiments", label: "Experiments", icon: FlaskConical },
-  { href: "/pipelines", label: "Pipelines", icon: Workflow },
-  { href: "/notebooks", label: "Notebooks", icon: BookOpen },
+  { href: "/pipelines", label: "Pipelines", icon: Workflow, guarded: true },
+  { href: "/notebooks", label: "Notebooks", icon: BookOpen, guarded: true },
   { href: "/storage", label: "Storage", icon: HardDrive },
   { href: "/sharing", label: "Sharing", icon: Share2 },
 ];
@@ -31,6 +36,16 @@ const nav = [
 export default function Sidebar() {
   const pathname = usePathname();
   const [collapsed, setCollapsed] = useState(false);
+  const [codeExec, setCodeExec] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/features")
+      .then((r) => r.json())
+      .then((d) => setCodeExec(!!d.codeExecution))
+      .catch(() => setCodeExec(false));
+  }, []);
+
+  const visibleNav = nav.filter((item) => !item.guarded || codeExec);
 
   return (
     <aside
@@ -54,7 +69,7 @@ export default function Sidebar() {
       </div>
 
       <nav className="flex-1 space-y-1 px-2 py-4">
-        {nav.map((item) => {
+        {visibleNav.map((item) => {
           const active =
             item.href === "/"
               ? pathname === "/"

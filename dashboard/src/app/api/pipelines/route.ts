@@ -4,6 +4,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { readFileSync, readdirSync, writeFileSync, mkdirSync, existsSync, statSync } from "fs";
 import { join, relative, resolve, sep } from "path";
+import { codeExecutionEnabled, codeExecutionDisabledResponse } from "@/lib/features";
 
 const PIPELINES_DIR = "/app/pipelines";
 
@@ -69,6 +70,8 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  // D6 / T-3.8: writing pipeline files is a mutation — disabled unless enabled.
+  if (!codeExecutionEnabled()) return codeExecutionDisabledResponse();
   try {
     const { specName, specContent, transformations } = await req.json();
 

@@ -5,6 +5,7 @@
 
 import { Suspense, useEffect, useState, useCallback, useRef } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
+import CodeExecGuard from "@/components/code-exec-guard";
 import {
   BookOpen,
   FileText,
@@ -1064,8 +1065,10 @@ function NotebooksPageInner() {
 
 export default function NotebooksPage() {
   return (
-    <Suspense>
-      <NotebooksPageInner />
-    </Suspense>
+    <CodeExecGuard feature="Notebooks">
+      <Suspense>
+        <NotebooksPageInner />
+      </Suspense>
+    </CodeExecGuard>
   );
 }
