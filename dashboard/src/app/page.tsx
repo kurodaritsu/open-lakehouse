@@ -1,0 +1,287 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Containerized Lakehouse Platform Contributors
+
+"use client";
+
+import { useEffect, useState } from "react";
+import {
+  Database,
+  FlaskConical,
+  HardDrive,
+  Share2,
+  Layers,
+  Cpu,
+  BookOpen,
+  ChevronDown,
+  ChevronUp,
+  ExternalLink,
+} from "lucide-react";
+import ServiceCard from "@/components/service-card";
+import Onboarding, { OnboardingResetButton } from "@/components/onboarding";
+import type { ServiceHealth } from "@/lib/api";
+
+const services: Omit<ServiceHealth, "status">[] = [
+  {
+    name: "MinIO",
+    url: "/api/minio/minio/health/live",
+    port: 9000,
+    description: "S3-compatible object storage",
+  },
+  {
+    name: "Unity Catalog",
+    url: "/api/uc/catalogs",
+    port: 8080,
+    description: "Data governance & catalog",
+  },
+  {
+    name: "MLflow",
+    url: "/api/health/mlflow",
+    port: 5000,
+    description: "Experiment tracking & model registry",
+  },
+  {
+    name: "OpenSharing",
+    url: "/api/health/delta-sharing",
+    port: 8443,
+    description: "External data sharing protocol",
+  },
+];
+
+const features = [
+  { icon: Database, label: "Unity Catalog", detail: "Three-level namespace governance", url: "http://localhost:8080", port: 8080 },
+  { icon: Layers, label: "Delta Lake + Iceberg", detail: "ACID transactions, time travel", url: null, port: null },
+  { icon: FlaskConical, label: "MLflow", detail: "Experiments, models, observability", url: "http://localhost:5000", port: 5000 },
+  { icon: Cpu, label: "Spark 4.1", detail: "Local or distributed compute", url: "http://localhost:8088", port: 8088 },
+  { icon: HardDrive, label: "MinIO Storage", detail: "S3-compatible, self-hosted", url: "http://localhost:9001", port: 9001 },
+  { icon: Share2, label: "OpenSharing", detail: "Secure external data sharing", url: "https://localhost:8443", port: 8443 },
+];
+
+export default function Dashboard() {
+  const [health, setHealth] = useState<ServiceHealth[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [showArchitecture, setShowArchitecture] = useState(false);
+
+  useEffect(() => {
+    async function check() {
+      const results = await Promise.all(
+        services.map(async (svc) => {
+          try {
+            const res = await fetch(svc.url, {
+              signal: AbortSignal.timeout(3000),
+            });
+            return {
+              ...svc,
+              status: res.ok ? ("healthy" as const) : ("unhealthy" as const),
+            };
+          } catch {
+            return { ...svc, status: "unknown" as const };
+          }
+        })
+      );
+      setHealth(results);
+      setLoading(false);
+    }
+    check();
+    const interval = setInterval(check, 30000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const healthyCount = health.filter((s) => s.status === "healthy").length;
+
+  return (
+    <div className="mx-auto max-w-6xl space-y-8">
+      <div>
+        <h1 className="text-2xl font-bold text-white">Platform Dashboard</h1>
+        <p className="mt-1 text-sm text-slate-400">
+          Self-hosted open-source data lakehouse
+        </p>
+      </div>
+
+      {/* Onboarding */}
+      <Onboarding allServicesHealthy={!loading && healthyCount === services.length} />
+
+      {/* Status summary */}
+      <div className="card flex items-center gap-4">
+        <div
+          className={`h-3 w-3 rounded-full ${
+            loading
+              ? "animate-pulse bg-amber-400"
+              : healthyCount === services.length
+                ? "bg-emerald-400"
+                : healthyCount > 0
+                  ? "bg-amber-400"
+                  : "bg-red-400"
+          }`}
+        />
+        <span className="text-sm text-slate-300">
+          {loading
+            ? "Checking services..."
+            : `${healthyCount} of ${services.length} services healthy`}
+        </span>
+      </div>
+
+      {/* Service health cards */}
+      <section>
+        <h2 className="mb-4 text-lg font-semibold text-white">Services</h2>
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          {loading
+            ? services.map((svc) => (
+                <div key={svc.name} className="card animate-pulse">
+                  <div className="h-16 rounded bg-slate-800" />
+                </div>
+              ))
+            : health.map((svc) => (
+                <ServiceCard key={svc.name} service={svc} />
+              ))}
+        </div>
+      </section>
+
+      {/* Platform capabilities */}
+      <section>
+        <h2 className="mb-4 text-lg font-semibold text-white">
+          Platform Components
+        </h2>
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {features.map((f) => {
+            const inner = (
+              <>
+                <f.icon size={18} className="mt-0.5 text-accent" />
+                <div className="flex-1">
+                  <p className="text-sm font-medium text-white group-hover:text-accent">
+                    {f.label}
+                  </p>
+                  <p className="mt-0.5 text-xs text-slate-400">{f.detail}</p>
+                </div>
+                {f.port && (
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-mono text-[11px] text-slate-500">
+                      :{f.port}
+                    </span>
+                    <ExternalLink size={12} className="text-slate-600 group-hover:text-accent" />
+                  </div>
+                )}
+              </>
+            );
+
+            return f.url ? (
+              <a
+                key={f.label}
+                href={f.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="card group flex items-start gap-3 transition-colors hover:border-accent/30"
+              >
+                {inner}
+              </a>
+            ) : (
+              <div
+                key={f.label}
+                className="card group flex items-start gap-3 transition-colors hover:border-slate-700"
+              >
+                {inner}
+              </div>
+            );
+          })}
+        </div>
+      </section>
+
+      {/* Architecture */}
+      <section>
+        <button
+          onClick={() => setShowArchitecture(!showArchitecture)}
+          className="mb-4 flex w-full items-center justify-between"
+        >
+          <h2 className="flex items-center gap-2 text-lg font-semibold text-white">
+            <BookOpen size={20} className="text-accent" />
+            Architecture Overview
+          </h2>
+          {showArchitecture ? (
+            <ChevronUp size={18} className="text-slate-500" />
+          ) : (
+            <ChevronDown size={18} className="text-slate-500" />
+          )}
+        </button>
+
+        {showArchitecture && (
+          <div className="space-y-4">
+            <div className="card">
+              <div className="rounded-lg border border-slate-800 bg-surface-dark p-5">
+                <pre className="font-mono text-xs leading-relaxed text-slate-300">
+{`Jupyter Notebook (client, port 8888)
+ │
+Apache Spark (local mode, or distributed via --profile cluster)
+ │
+Unity Catalog OSS (governance, port 8080)
+ │
+Delta Lake / Iceberg (table formats)
+ │
+MinIO (S3-compatible storage, ports 9000/9001)
+ │
+MLflow (experiment tracking & model registry, port 5000)
+OpenSharing Server (external sharing, port 8443)`}
+                </pre>
+              </div>
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-3">
+              <div className="card">
+                <p className="text-sm font-medium text-white">Compute</p>
+                <p className="mt-1 text-xs text-slate-400">
+                  Spark runs in <span className="font-mono text-emerald-300">local[*]</span> mode by default.
+                  Start distributed compute with <span className="font-mono text-emerald-300">make cluster</span>.
+                </p>
+              </div>
+              <div className="card">
+                <p className="text-sm font-medium text-white">Storage</p>
+                <p className="mt-1 text-xs text-slate-400">
+                  All data stored in MinIO at <span className="font-mono text-emerald-300">s3a://lakehouse-data/</span>.
+                  Bind-mounted to <span className="font-mono text-emerald-300">data/minio/</span> on your machine.
+                </p>
+              </div>
+              <div className="card">
+                <p className="text-sm font-medium text-white">Table Formats</p>
+                <p className="mt-1 text-xs text-slate-400">
+                  Both Delta Lake and Iceberg are supported. ACID transactions, time travel,
+                  and schema evolution on object storage.
+                </p>
+              </div>
+            </div>
+          </div>
+        )}
+      </section>
+
+      {/* Quick links */}
+      <section>
+        <h2 className="mb-4 text-lg font-semibold text-white">Quick Access</h2>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          {[
+            { label: "Jupyter Notebook", url: "http://localhost:8888", port: 8888 },
+            { label: "MinIO Console", url: "http://localhost:9001", port: 9001 },
+            { label: "MLflow UI", url: "http://localhost:5000", port: 5000 },
+            { label: "Unity Catalog API", url: "http://localhost:8080", port: 8080 },
+          ].map((link) => (
+            <a
+              key={link.label}
+              href={link.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="card group flex items-center justify-between transition-colors hover:border-accent/30"
+            >
+              <span className="text-sm text-slate-300 group-hover:text-white">
+                {link.label}
+              </span>
+              <span className="font-mono text-[11px] text-slate-500">
+                :{link.port}
+              </span>
+            </a>
+          ))}
+        </div>
+      </section>
+
+      {/* Footer with onboarding reset */}
+      <div className="flex justify-center pt-2 pb-4">
+        <OnboardingResetButton />
+      </div>
+    </div>
+  );
+}

@@ -1,0 +1,54 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Containerized Lakehouse Platform Contributors
+
+import { NextRequest, NextResponse } from "next/server";
+
+const MLFLOW_URL = () =>
+  process.env.MLFLOW_URL || "http://localhost:5000";
+
+async function proxy(req: NextRequest, path: string) {
+  const baseUrl = MLFLOW_URL();
+  const query = req.nextUrl.search;
+  const url = `${baseUrl}/api/${path}${query}`;
+  const dest = new URL(url);
+
+  const headers: Record<string, string> = {
+    Host: dest.host,
+    "X-Requested-With": "XMLHttpRequest",
+  };
+  if (req.method !== "GET") {
+    headers["Content-Type"] = "application/json";
+  }
+
+  try {
+    const res = await fetch(url, {
+      method: req.method,
+      headers,
+      body: req.method !== "GET" ? await req.text() : undefined,
+      signal: AbortSignal.timeout(10000),
+    });
+    const data = await res.text();
+    return new NextResponse(data, {
+      status: res.status,
+      headers: { "Content-Type": res.headers.get("Content-Type") || "application/json" },
+    });
+  } catch {
+    return NextResponse.json({ error: "MLflow unreachable" }, { status: 502 });
+  }
+}
+
+export async function GET(
+  req: NextRequest,
+  { params }: { params: Promise<{ path: string[] }> }
+) {
+  const { path } = await params;
+  return proxy(req, path.join("/"));
+}
+
+export async function POST(
+  req: NextRequest,
+  { params }: { params: Promise<{ path: string[] }> }
+) {
+  const { path } = await params;
+  return proxy(req, path.join("/"));
+}

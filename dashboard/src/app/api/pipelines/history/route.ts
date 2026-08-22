@@ -1,0 +1,36 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Containerized Lakehouse Platform Contributors
+
+import { NextRequest, NextResponse } from "next/server";
+import { getRunHistory, deleteRun, clearRunHistory } from "@/lib/s3";
+
+export async function GET() {
+  try {
+    const history = await getRunHistory();
+    return NextResponse.json({ history });
+  } catch (err) {
+    console.error("GET /api/pipelines/history error:", err);
+    return NextResponse.json(
+      { error: "Failed to load run history from storage", history: [] },
+      { status: 502 }
+    );
+  }
+}
+
+export async function DELETE(req: NextRequest) {
+  try {
+    const { id } = await req.json().catch(() => ({ id: null }));
+    if (id) {
+      const updated = await deleteRun(id);
+      return NextResponse.json({ history: updated });
+    }
+    await clearRunHistory();
+    return NextResponse.json({ history: [] });
+  } catch (err) {
+    console.error("DELETE /api/pipelines/history error:", err);
+    return NextResponse.json(
+      { error: "Failed to update run history" },
+      { status: 502 }
+    );
+  }
+}
