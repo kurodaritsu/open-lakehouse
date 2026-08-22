@@ -3,9 +3,19 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { readFileSync, readdirSync, writeFileSync, mkdirSync, existsSync, statSync } from "fs";
-import { join, relative } from "path";
+import { join, relative, resolve, sep } from "path";
 
 const PIPELINES_DIR = "/app/pipelines";
+
+// True iff a candidate relative path resolves to PIPELINES_DIR itself or a path
+// nested inside it (T-3.7). The trailing-separator boundary is what rejects a
+// sibling directory such as /app/pipelines-evil that a bare
+// startsWith(resolve(PIPELINES_DIR)) would wrongly admit.
+function isInsidePipelinesDir(candidate: string): boolean {
+  const base = resolve(PIPELINES_DIR);
+  const resolved = resolve(base, candidate);
+  return resolved === base || resolved.startsWith(base + sep);
+}
 
 function walkDir(dir: string): string[] {
   const files: string[] = [];
@@ -66,22 +76,21 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "specName and specContent required" }, { status: 400 });
     }
 
-    const specPath = join(PIPELINES_DIR, specName.endsWith(".yml") ? specName : `${specName}.yml`);
+    const specFileName = specName.endsWith(".yml") ? specName : `${specName}.yml`;
 
-    // Prevent path traversal
-    const resolvedSpec = require("path").resolve(PIPELINES_DIR, specName.endsWith(".yml") ? specName : `${specName}.yml`);
-    if (!resolvedSpec.startsWith(require("path").resolve(PIPELINES_DIR))) {
+    // Prevent path traversal (T-3.7).
+    if (!isInsidePipelinesDir(specFileName)) {
       return NextResponse.json({ error: "Invalid path" }, { status: 400 });
     }
 
+    const specPath = join(PIPELINES_DIR, specFileName);
     writeFileSync(specPath, specContent, "utf-8");
 
     if (transformations && Array.isArray(transformations)) {
       for (const t of transformations) {
         if (!t.path || !t.content) continue;
-        // Prevent path traversal
-        const resolvedT = require("path").resolve(PIPELINES_DIR, t.path);
-        if (!resolvedT.startsWith(require("path").resolve(PIPELINES_DIR))) {
+        // Prevent path traversal (T-3.7).
+        if (!isInsidePipelinesDir(t.path)) {
           return NextResponse.json({ error: "Invalid path" }, { status: 400 });
         }
         const tPath = join(PIPELINES_DIR, t.path);
