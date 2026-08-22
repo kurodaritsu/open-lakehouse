@@ -351,3 +351,56 @@ class TestUcPropertiesExampleCommitted:
             text=True,
         )
         assert proc.returncode == 0, "server.properties should be gitignored"
+
+
+# ---------------------------------------------------------------------------------
+# Backup/restore must never touch the live Composed storage volumes (/code-review
+# HIGH: restore_apply wiping postgres-data / seaweedfs-data under the running store).
+# ---------------------------------------------------------------------------------
+
+import re  # noqa: E402
+
+
+class TestBackupRestoreSkipStorageVolumes:
+    """postgres-data / seaweedfs-data hold the metastore + object store; their
+    services stay live during backup/restore, and their content is captured by
+    pg_dump + s3 sync. Volume-archiving or volume-restoring them corrupts the running
+    store, so both paths must skip every "never"-mode volume (the guard reset honors).
+    """
+
+    TEXT = LAKEHOUSE.read_text()
+
+    def _body(self, name: str) -> str:
+        m = re.search(rf"\n{name}\(\) \{{(.*?)\n\}}\n", self.TEXT, re.S)
+        assert m, f"function {name}() not found in lakehouse"
+        return m.group(1)
+
+    def test_reset_volume_mode_marks_storage_never(self):
+        body = self._body("reset_volume_mode")
+        for vol in ("postgres-data", "seaweedfs-data"):
+            assert re.search(
+                rf'{re.escape(vol)}\)\s*echo "never"', body
+            ), f"{vol} must map to 'never' so backup/restore skip it"
+
+    def test_backup_skips_never_mode_volumes(self):
+        body = self._body("backup_take_snapshot")
+        # The volume loop must consult reset_volume_mode and skip "never" volumes
+        # BEFORE volume_backup, so a "never" volume never lands in the MANIFEST.
+        assert (
+            'reset_volume_mode "$v"' in body
+        ), "backup must check reset_volume_mode per volume"
+        assert (
+            '"never"' in body and "continue" in body
+        ), "backup_take_snapshot must skip never-mode volumes before volume_backup"
+
+    def test_restore_skips_never_mode_volumes(self):
+        body = self._body("restore_apply")
+        # The MANIFEST stores EFFECTIVE (project-prefixed) volume names, so restore must
+        # compare against reset_effective_volume of the never-mode volumes (not the base
+        # names reset_volume_mode keys on) before volume_restore.
+        assert (
+            "reset_effective_volume" in body and '"never"' in body
+        ), "restore_apply must skip never-mode volumes (by effective name) before volume_restore"
+        assert (
+            "volume_restore" in body
+        ), "sanity: restore_apply still restores non-storage volumes"

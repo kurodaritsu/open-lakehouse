@@ -2411,8 +2411,14 @@ backup_take_snapshot() {
         uc_h2_backup "$dir" || return 1
     fi
 
-    # Named volumes (absent ones skipped).
+    # Named volumes (absent ones skipped). Skip "never"-mode volumes: postgres-data
+    # and seaweedfs-data hold the metastore/object store whose CONTENT is already
+    # captured authoritatively above (pg_dump + s3_sync), and their services are NOT
+    # quiesced (backup_writer_containers excludes them), so tarring their live data
+    # dir would yield a torn archive and drive a corrupting volume_restore. Same guard
+    # reset honors via reset_volume_mode (uc-logs is diagnostics, also skipped).
     for v in $(reset_discover_volumes); do
+        [ "$(reset_volume_mode "$v")" = "never" ] && continue
         vn=$(reset_effective_volume "$v")
         echo -e "${YELLOW}Archiving volume ${vn}...${NC}"
         volume_backup "$vn" "${dir}/volumes" || return 1
@@ -2568,7 +2574,21 @@ restore_apply() {
     aws_s3 mb "s3://${bucket}" >/dev/null 2>&1 || true  # ensure the bucket exists first
     s3_sync upload "$bucket" "${dir}/s3" || return 1
 
+    # Defense against a pre-fix manifest that still lists a "never"-mode storage
+    # volume: never rm -rf + tar-restore postgres-data/seaweedfs-data under the live
+    # store — their content is restored via pg_restore + s3_sync above. The manifest
+    # stores EFFECTIVE (project-prefixed) names, so compare against the effective names
+    # of the never-mode volumes rather than the base names reset_volume_mode keys on.
+    local never_vols="" nv
+    for nv in $(reset_discover_volumes); do
+        [ "$(reset_volume_mode "$nv")" = "never" ] && never_vols="${never_vols} $(reset_effective_volume "$nv")"
+    done
     for v in $vols; do
+        case " ${never_vols} " in
+            *" ${v} "*)
+                echo -e "${YELLOW}Skipping volume ${v} (restored via pg_restore + s3 sync)${NC}"
+                continue ;;
+        esac
         echo -e "${YELLOW}Restoring volume ${v}...${NC}"
         volume_restore "$v" "${dir}/volumes/${v}.tar" || return 1
     done
