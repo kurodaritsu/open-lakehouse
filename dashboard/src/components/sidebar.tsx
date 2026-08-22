@@ -49,14 +49,15 @@ export default function Sidebar() {
 
   return (
     <aside
-      className={`flex h-screen flex-col border-r border-slate-800 bg-surface transition-all duration-200 ${
+      className={`flex h-screen flex-col border-r border-white/[0.06] bg-surface transition-all duration-200 ${
         collapsed ? "w-16" : "w-56"
       }`}
     >
-      <div className="flex h-14 items-center gap-2 border-b border-slate-800 px-4">
+      <div className="flex h-14 items-center gap-2 border-b border-white/[0.06] px-4">
+        <div className="h-7 w-7 shrink-0 rounded-lg brand-gradient" />
         {!collapsed && (
-          <span className="text-sm font-bold tracking-wide text-white">
-            Lakehouse
+          <span className="text-sm font-bold tracking-tight text-white">
+            Open Lakehouse
           </span>
         )}
         <button
@@ -81,7 +82,7 @@ export default function Sidebar() {
               className={`flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors ${
                 active
                   ? "bg-accent/10 text-accent"
-                  : "text-slate-400 hover:bg-slate-800 hover:text-white"
+                  : "text-slate-400 hover:bg-white/5 hover:text-white"
               }`}
             >
               <item.icon size={18} />
@@ -91,9 +92,9 @@ export default function Sidebar() {
         })}
       </nav>
 
-      <div className="border-t border-slate-800 px-4 py-3">
+      <div className="border-t border-white/[0.06] px-4 py-3">
         {!collapsed && (
-          <p className="text-[10px] uppercase tracking-widest text-slate-600">
+          <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500">
             Open-Source Lakehouse
           </p>
         )}

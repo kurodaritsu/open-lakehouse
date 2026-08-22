@@ -113,10 +113,12 @@ export default function Dashboard() {
   return (
     <div className="mx-auto max-w-6xl space-y-8">
       <div>
-        <h1 className="text-2xl font-bold text-white">Platform Dashboard</h1>
+        <p className="eyebrow">Open Lakehouse</p>
+        <h1 className="text-3xl font-bold tracking-tight text-white">Platform Dashboard</h1>
         <p className="mt-1 text-sm text-slate-400">
           Read-only viewer for the open-lakehouse platform
         </p>
+        <div className="mt-4 h-1 w-24 rounded-full brand-gradient" />
       </div>
 
       {/* Onboarding */}
@@ -144,6 +146,7 @@ export default function Dashboard() {
 
       {/* Service health cards */}
       <section>
+        <p className="eyebrow">Health</p>
         <h2 className="mb-4 text-lg font-semibold text-white">Services</h2>
         <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
           {loading
@@ -160,6 +163,7 @@ export default function Dashboard() {
 
       {/* Platform capabilities */}
       <section>
+        <p className="eyebrow">The Stack</p>
         <h2 className="mb-4 text-lg font-semibold text-white">
           Platform Components
         </h2>
@@ -167,7 +171,9 @@ export default function Dashboard() {
           {features.map((f) => {
             const inner = (
               <>
-                <f.icon size={18} className="mt-0.5 text-accent" />
+                <span className="icon-badge">
+                  <f.icon size={18} />
+                </span>
                 <div className="flex-1">
                   <p className="text-sm font-medium text-white group-hover:text-accent">
                     {f.label}
@@ -272,6 +278,7 @@ Delta Sharing (external sharing, port 8443 — optional)`}
 
       {/* Quick links */}
       <section>
+        <p className="eyebrow">Shortcuts</p>
         <h2 className="mb-4 text-lg font-semibold text-white">Quick Access</h2>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           {[

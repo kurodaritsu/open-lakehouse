@@ -6,8 +6,8 @@ import "./globals.css";
 import Sidebar from "@/components/sidebar";
 
 export const metadata: Metadata = {
-  title: "Lakehouse Platform",
-  description: "Self-hosted open-source data lakehouse",
+  title: "Open Lakehouse",
+  description: "Read-only viewer for the open-lakehouse platform",
 };
 
 export default function RootLayout({
