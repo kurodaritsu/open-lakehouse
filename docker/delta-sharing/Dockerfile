@@ -66,14 +66,16 @@ FROM eclipse-temurin:11-jre-jammy
 
 ARG PIP_INDEX_URL=
 
-# Install only runtime dependencies
+# Install only runtime dependencies. The proxy needs `requests`; honor
+# PIP_INDEX_URL when supplied (public default otherwise) so the image builds
+# behind a package proxy — matches this repo's build-arg convention (T-6.2).
 RUN apt-get update && apt-get install -y \
     curl \
     openssl \
     python3 \
     python3-pip \
     && rm -rf /var/lib/apt/lists/* \
-    && pip3 install --no-cache-dir requests
+    && pip3 install --no-cache-dir ${PIP_INDEX_URL:+--index-url "$PIP_INDEX_URL"} requests
 
 # Create non-root user
 RUN groupadd -r deltasharing && \
