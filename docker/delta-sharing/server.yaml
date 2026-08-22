@@ -4,27 +4,23 @@
 # The format version of this config file
 version: 1
 
-# Config shares/schemas/tables to share
-# NOTE: Only list tables that have valid Delta logs in MinIO.
-# Tables without data cause 400/500 errors and break Databricks Catalog Explorer.
+# Config shares/schemas/tables to share.
+# NOTE: Only list tables that have valid Delta logs in SeaweedFS. Tables without
+# data cause 400/500 errors and break clients (e.g. Databricks Catalog Explorer).
+# These two are written by the self-contained sharing seed
+# (scripts/sharing/seed_shared_tables.py) to fixed s3a:// prefixes, so the share
+# is verifiable in isolation and does not depend on any demo having run first.
 shares:
 - name: "lakehouse_share"
   schemas:
   - name: "retail"
     tables:
-    # Gold data products built by the Spark Declarative Pipeline (pipelines/).
     - name: "sales_by_region"
-      location: "s3a://lakehouse-data/warehouse/gold_sales_by_region/"
+      location: "s3a://lakehouse/warehouse/sharing/sales_by_region/"
       id: "00000000-0000-0000-0000-000000000010"
     - name: "daily_revenue"
-      location: "s3a://lakehouse-data/warehouse/gold_daily_revenue/"
+      location: "s3a://lakehouse/warehouse/sharing/daily_revenue/"
       id: "00000000-0000-0000-0000-000000000011"
-  - name: "streaming"
-    tables:
-    # Live crypto rates table produced by notebooks/07_Streaming.ipynb.
-    - name: "crypto_rates"
-      location: "s3a://lakehouse-data/warehouse/lakehouse.db/crypto_rates/"
-      id: "00000000-0000-0000-0000-000000000012"
 
 # Authorization - bearer tokens for recipients
 authorization:
@@ -42,12 +38,12 @@ endpoint: "/delta-sharing"
 # Set the timeout of S3 presigned url in seconds
 preSignedUrlTimeoutSeconds: 3600
 
-# Hadoop/S3 storage configuration for MinIO
+# Hadoop/S3 storage configuration for SeaweedFS
 # Reference: https://github.com/delta-io/delta-sharing
 hadoopConf:
-  "fs.s3a.endpoint": "http://minio:9000"
-  "fs.s3a.access.key": "__MINIO_ACCESS_KEY__"
-  "fs.s3a.secret.key": "__MINIO_SECRET_KEY__"
+  "fs.s3a.endpoint": "http://seaweedfs:8333"
+  "fs.s3a.access.key": "__S3_ACCESS_KEY__"
+  "fs.s3a.secret.key": "__S3_SECRET_KEY__"
   "fs.s3a.path.style.access": "true"
   "fs.s3a.connection.ssl.enabled": "false"
   "fs.s3a.endpoint.region": "us-east-1"

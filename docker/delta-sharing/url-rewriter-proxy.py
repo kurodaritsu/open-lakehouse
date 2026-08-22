@@ -1,19 +1,22 @@
+#!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Containerized Lakehouse Platform Contributors
-
-#!/usr/bin/env python3
 """
 OpenSharing Response URL Re-signing Proxy
 
-This proxy intercepts responses from the OpenSharing server and replaces
-pre-signed S3 URLs with freshly signed URLs pointing to the MinIO Cloudflare
-tunnel endpoint.
+This proxy intercepts responses from the OpenSharing server and replaces the
+pre-signed S3 URLs it emits with freshly signed URLs pointing at this stack's
+SeaweedFS S3 endpoint.
 
-The OpenSharing server generates pre-signed URLs for AWS S3 (virtual-hosted
-style), but when using MinIO behind a Cloudflare tunnel, these URLs must be
-re-signed for the tunnel hostname to ensure signature validity.
+Why re-sign rather than swap the host: the Delta Sharing server has an upstream
+bug (T-4.8, delta-io/delta-sharing#753) — its S3FileSigner ignores
+fs.s3a.endpoint and always signs URLs for s3.amazonaws.com. Simply rewriting the
+hostname would invalidate the SigV4 signature, so the proxy computes a brand-new
+signature for the target endpoint, which SeaweedFS then verifies (see the
+seaweedfs-ops skill: signed-host == delivered-host on the local path; modes B/C
+via X-Forwarded-Host / Host override for a public tunnel).
 
-The MinIO endpoint and credentials are read from environment variables.
+The S3 endpoint, scheme, and credentials are read from environment variables.
 """
 
 import hashlib
@@ -53,10 +56,11 @@ _session.verify = False  # Self-signed cert for upstream OpenSharing
 UPSTREAM_HOST = os.getenv("DELTA_SHARING_HOST", "localhost")
 UPSTREAM_PORT = int(os.getenv("DELTA_SHARING_PORT", "8444"))  # Internal port
 PROXY_PORT = int(os.getenv("PROXY_PORT", "8443"))  # External port
-MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "your-minio-tunnel.trycloudflare.com")
-# Scheme for the rewritten URLs: 'https' for a public tunnel (default), 'http' for
-# an in-network MinIO endpoint (e.g. minio:9000) so sharing works fully offline.
-MINIO_PUBLIC_SCHEME = os.getenv("MINIO_PUBLIC_SCHEME", "https")
+# The public S3 endpoint the CLIENT will reach. Default = the host-published
+# SeaweedFS port, so `./lakehouse share` works locally with no tunnel. Override
+# to a public tunnel host (with S3_PUBLIC_SCHEME=https) for external sharing.
+S3_PUBLIC_ENDPOINT = os.getenv("S3_PUBLIC_ENDPOINT", "localhost:8333")
+S3_PUBLIC_SCHEME = os.getenv("S3_PUBLIC_SCHEME", "http")
 AWS_ACCESS_KEY = os.getenv("AWS_ACCESS_KEY_ID", "")
 AWS_SECRET_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
@@ -64,9 +68,9 @@ AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 # Regex to match pre-signed S3 URLs in JSON responses
 # Matches virtual-hosted style: https://bucket.s3.amazonaws.com/key?X-Amz-...
 # Matches path style: https://s3.amazonaws.com/bucket/key?X-Amz-...
-# Matches internal MinIO: http://minio:9000/bucket/key?X-Amz-...
+# Matches internal SeaweedFS: http://seaweedfs:8333/bucket/key?X-Amz-...
 PRESIGNED_URL_PATTERN = re.compile(
-    r'"(https?://(?:[a-zA-Z0-9\-]+\.s3\.amazonaws\.com|s3\.amazonaws\.com|minio:9000)/[^"]*X-Amz-Signature=[^"]*)"'
+    r'"(https?://(?:[a-zA-Z0-9\-]+\.s3\.amazonaws\.com|s3\.amazonaws\.com|seaweedfs:8333)/[^"]*X-Amz-Signature=[^"]*)"'
 )
 
 
@@ -86,10 +90,10 @@ def _get_signature_key(secret_key, date_stamp, region, service):
 
 def generate_presigned_url(bucket, key, expires_in=3600):
     """
-    Generate a new AWS v4 pre-signed GET URL for the MinIO tunnel endpoint.
+    Generate a new AWS v4 pre-signed GET URL for the SeaweedFS tunnel endpoint.
     Uses path-style access: https://tunnel-host/bucket/key
     """
-    host = MINIO_ENDPOINT
+    host = S3_PUBLIC_ENDPOINT
     now = datetime.now(timezone.utc)
     date_stamp = now.strftime("%Y%m%d")
     amz_date = now.strftime("%Y%m%dT%H%M%SZ")
@@ -144,7 +148,7 @@ def generate_presigned_url(bucket, key, expires_in=3600):
 
     # Build final URL
     final_qs = f"{canonical_querystring}&X-Amz-Signature={signature}"
-    return f"{MINIO_PUBLIC_SCHEME}://{host}{canonical_uri}?{final_qs}"
+    return f"{S3_PUBLIC_SCHEME}://{host}{canonical_uri}?{final_qs}"
 
 
 def parse_s3_url(url):
@@ -157,7 +161,7 @@ def parse_s3_url(url):
         key = parsed.path.lstrip("/")
         return bucket, key
 
-    # Path-style: s3.amazonaws.com/bucket/key or minio:9000/bucket/key
+    # Path-style: s3.amazonaws.com/bucket/key or seaweedfs:8333/bucket/key
     path_parts = parsed.path.lstrip("/").split("/", 1)
     if len(path_parts) >= 2:
         return path_parts[0], path_parts[1]
@@ -166,7 +170,7 @@ def parse_s3_url(url):
 
 
 def resign_url(match):
-    """Replace a pre-signed S3 URL with a freshly signed MinIO tunnel URL"""
+    """Replace a pre-signed S3 URL with a freshly signed SeaweedFS tunnel URL"""
     original_url = match.group(1)
     bucket, key = parse_s3_url(original_url)
 
@@ -204,7 +208,7 @@ def rewrite_response_body(body, content_type):
         if text != original_text:
             count = len(PRESIGNED_URL_PATTERN.findall(original_text))
             logger.info(
-                f"✓ Re-signed {count} pre-signed URL(s) for tunnel: {MINIO_ENDPOINT}"
+                f"✓ Re-signed {count} pre-signed URL(s) for tunnel: {S3_PUBLIC_ENDPOINT}"
             )
         return text.encode("utf-8")
     except Exception as e:
@@ -283,9 +287,9 @@ def main():
     logger.info("=" * 60)
     logger.info(f"Upstream: https://{UPSTREAM_HOST}:{UPSTREAM_PORT}")
     logger.info(f"Proxy listening on: https://0.0.0.0:{PROXY_PORT}")
-    logger.info(f"MinIO tunnel endpoint: https://{MINIO_ENDPOINT}")
+    logger.info(f"SeaweedFS tunnel endpoint: https://{S3_PUBLIC_ENDPOINT}")
     logger.info(
-        f"Re-signing: S3 pre-signed URLs → {MINIO_ENDPOINT} (path-style, AWS v4)"
+        f"Re-signing: S3 pre-signed URLs → {S3_PUBLIC_ENDPOINT} (path-style, AWS v4)"
     )
     logger.info(f"Credentials: {'configured' if AWS_ACCESS_KEY else 'NOT SET'}")
     logger.info("=" * 60)

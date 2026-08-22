@@ -45,8 +45,11 @@ mkdir -p /var/log/delta-sharing
 # Set Hadoop configuration directory
 export HADOOP_CONF_DIR="/opt/delta-sharing/conf"
 
-# Get MinIO endpoint from environment (allows runtime configuration)
-export MINIO_ENDPOINT="${MINIO_ENDPOINT:-your-minio-tunnel.trycloudflare.com}"
+# Get the public S3 endpoint from environment (allows runtime configuration).
+# Default = the host-published SeaweedFS port, so sharing works locally with no
+# tunnel; override S3_PUBLIC_ENDPOINT (+ S3_PUBLIC_SCHEME=https) for a public tunnel.
+export S3_PUBLIC_ENDPOINT="${S3_PUBLIC_ENDPOINT:-localhost:8333}"
+export S3_PUBLIC_SCHEME="${S3_PUBLIC_SCHEME:-http}"
 
 # Process config templates - substitute placeholders with env var values
 echo "Processing configuration templates..." >&2
@@ -55,13 +58,13 @@ mkdir -p /opt/delta-sharing/runtime
 # Process server.yaml: substitute credentials and token
 cp /opt/delta-sharing/conf/server.yaml /opt/delta-sharing/runtime/server.yaml
 sed -i \
-    -e "s|__MINIO_ACCESS_KEY__|${AWS_ACCESS_KEY_ID}|g" \
-    -e "s|__MINIO_SECRET_KEY__|${AWS_SECRET_ACCESS_KEY}|g" \
+    -e "s|__S3_ACCESS_KEY__|${AWS_ACCESS_KEY_ID}|g" \
+    -e "s|__S3_SECRET_KEY__|${AWS_SECRET_ACCESS_KEY}|g" \
     -e "s|__DELTA_SHARING_TOKEN__|${DELTA_SHARING_TOKEN}|g" \
     /opt/delta-sharing/runtime/server.yaml
 
 # Validate that credential placeholders were replaced in server.yaml
-if grep -q '__MINIO_ACCESS_KEY__\|__MINIO_SECRET_KEY__' /opt/delta-sharing/runtime/server.yaml; then
+if grep -q '__S3_ACCESS_KEY__\|__S3_SECRET_KEY__' /opt/delta-sharing/runtime/server.yaml; then
     echo "ERROR: Failed to substitute credential placeholders in server.yaml" >&2
     exit 1
 fi
@@ -73,21 +76,21 @@ fi
 cp /opt/delta-sharing/conf/core-site.xml /opt/delta-sharing/runtime/core-site.xml
 for f in /opt/delta-sharing/runtime/core-site.xml /opt/delta-sharing/conf/core-site.xml; do
     sed -i \
-        -e "s|__MINIO_ACCESS_KEY__|${AWS_ACCESS_KEY_ID}|g" \
-        -e "s|__MINIO_SECRET_KEY__|${AWS_SECRET_ACCESS_KEY}|g" \
+        -e "s|__S3_ACCESS_KEY__|${AWS_ACCESS_KEY_ID}|g" \
+        -e "s|__S3_SECRET_KEY__|${AWS_SECRET_ACCESS_KEY}|g" \
         "$f" 2>/dev/null || true
 done
 
 # Validate that credential placeholders were replaced in core-site.xml
-if grep -q '__MINIO_ACCESS_KEY__\|__MINIO_SECRET_KEY__' /opt/delta-sharing/runtime/core-site.xml; then
+if grep -q '__S3_ACCESS_KEY__\|__S3_SECRET_KEY__' /opt/delta-sharing/runtime/core-site.xml; then
     echo "ERROR: Failed to substitute credential placeholders in core-site.xml" >&2
     exit 1
 fi
 
-# Process aws-config: substitute MinIO endpoint
+# Process aws-config: substitute the public S3 endpoint
 cp /opt/delta-sharing/conf/aws-config /opt/delta-sharing/runtime/aws-config
 sed -i \
-    -e "s|__MINIO_ENDPOINT__|${MINIO_ENDPOINT}|g" \
+    -e "s|__S3_PUBLIC_ENDPOINT__|${S3_PUBLIC_ENDPOINT}|g" \
     /opt/delta-sharing/runtime/aws-config
 export AWS_CONFIG_FILE="/opt/delta-sharing/runtime/aws-config"
 
@@ -100,9 +103,9 @@ sed -i 's/port: 8443/port: 8444/' /opt/delta-sharing/runtime/server.yaml
 echo "OpenSharing Server Configuration:" >&2
 echo "  - Upstream Port: 8444 (internal, HTTPS)" >&2
 echo "  - Proxy Port: 8443 (external, HTTPS)" >&2
-echo "  - Storage: MinIO at http://minio:9000" >&2
-echo "  - MinIO Public Endpoint: https://${MINIO_ENDPOINT}" >&2
-echo "  - URL Rewriting: *.s3.amazonaws.com → ${MINIO_ENDPOINT}" >&2
+echo "  - Storage: SeaweedFS at http://seaweedfs:8333" >&2
+echo "  - Public S3 Endpoint: ${S3_PUBLIC_SCHEME}://${S3_PUBLIC_ENDPOINT}" >&2
+echo "  - URL Rewriting: *.s3.amazonaws.com → ${S3_PUBLIC_ENDPOINT}" >&2
 echo "  - Shares: lakehouse_share" >&2
 echo "  - Hadoop Config: $HADOOP_CONF_DIR" >&2
 echo "" >&2
