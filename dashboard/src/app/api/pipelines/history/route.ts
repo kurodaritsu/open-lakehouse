@@ -6,6 +6,8 @@ import { getRunHistory, deleteRun, clearRunHistory } from "@/lib/s3";
 import { codeExecutionEnabled, codeExecutionDisabledResponse } from "@/lib/features";
 
 export async function GET() {
+  // D6 / T-3.8: run history is part of the disabled pipelines feature.
+  if (!codeExecutionEnabled()) return codeExecutionDisabledResponse();
   try {
     const history = await getRunHistory();
     return NextResponse.json({ history });

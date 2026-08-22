@@ -19,10 +19,17 @@ vi.mock("fs", () => ({
 }));
 
 import { GET as featuresGET } from "@/app/api/features/route";
-import { POST as pipelinesPOST } from "@/app/api/pipelines/route";
+import { GET as pipelinesGET, POST as pipelinesPOST } from "@/app/api/pipelines/route";
 import { POST as jupyterExecPOST } from "@/app/api/jupyter-exec/route";
 import { POST as pipelinesRunPOST } from "@/app/api/pipelines/run/route";
-import { DELETE as historyDELETE } from "@/app/api/pipelines/history/route";
+import { GET as historyGET, DELETE as historyDELETE } from "@/app/api/pipelines/history/route";
+import { GET as jupyterGET } from "@/app/api/jupyter/[...path]/route";
+import { codeExecutionEnabled } from "@/lib/features";
+
+function jupyterCall(handler: typeof jupyterGET) {
+  const req = new NextRequest("http://localhost:3000/api/jupyter/contents/work");
+  return handler(req, { params: Promise.resolve({ path: ["contents", "work"] }) });
+}
 
 const ORIGINAL = process.env.DASHBOARD_ALLOW_CODE_EXECUTION;
 
@@ -81,6 +88,39 @@ describe("code-execution feature flag (F-10)", () => {
         jsonReq("http://localhost:3000/api/pipelines/history", { id: "1" })
       );
       expect(res.status).toBe(403);
+    });
+
+    it("disables GET /api/pipelines (403) — whole feature off, not just writes", async () => {
+      const res = await pipelinesGET();
+      expect(res.status).toBe(403);
+    });
+
+    it("disables GET /api/pipelines/history (403)", async () => {
+      const res = await historyGET();
+      expect(res.status).toBe(403);
+    });
+
+    it("disables the /api/jupyter proxy (403)", async () => {
+      const res = await jupyterCall(jupyterGET);
+      expect(res.status).toBe(403);
+    });
+  });
+
+  // Only the exact string "true" enables — no truthy-ish bypass.
+  describe("flag strictness", () => {
+    for (const val of ["1", "TRUE", "True", "yes", "on", "false", ""]) {
+      it(`treats ${JSON.stringify(val)} as disabled`, () => {
+        process.env.DASHBOARD_ALLOW_CODE_EXECUTION = val;
+        expect(codeExecutionEnabled()).toBe(false);
+      });
+    }
+    it("treats unset as disabled", () => {
+      delete process.env.DASHBOARD_ALLOW_CODE_EXECUTION;
+      expect(codeExecutionEnabled()).toBe(false);
+    });
+    it("enables only on exactly 'true'", () => {
+      process.env.DASHBOARD_ALLOW_CODE_EXECUTION = "true";
+      expect(codeExecutionEnabled()).toBe(true);
     });
   });
 

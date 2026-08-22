@@ -66,6 +66,7 @@ def test_code_execution_off_by_default():
 
     gated = [
         "src/app/api/jupyter-exec/route.ts",
+        "src/app/api/jupyter/[...path]/route.ts",
         "src/app/api/pipelines/run/route.ts",
         "src/app/api/pipelines/route.ts",
         "src/app/api/pipelines/history/route.ts",

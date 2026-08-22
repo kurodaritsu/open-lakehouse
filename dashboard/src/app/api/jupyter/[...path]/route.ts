@@ -3,6 +3,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { requireEnv } from "@/lib/env";
+import { codeExecutionEnabled, codeExecutionDisabledResponse } from "@/lib/features";
 
 const JUPYTER_URL = () => process.env.JUPYTER_URL || "http://jupyter:8888";
 const JUPYTER_TOKEN = () => requireEnv("JUPYTER_TOKEN");
@@ -54,6 +55,7 @@ export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ path: string[] }> }
 ) {
+  if (!codeExecutionEnabled()) return codeExecutionDisabledResponse();
   const { path } = await params;
   const invalid = validatePath(path);
   if (invalid) return invalid;
@@ -64,6 +66,7 @@ export async function POST(
   req: NextRequest,
   { params }: { params: Promise<{ path: string[] }> }
 ) {
+  if (!codeExecutionEnabled()) return codeExecutionDisabledResponse();
   const { path } = await params;
   const invalid = validatePath(path);
   if (invalid) return invalid;
@@ -74,6 +77,7 @@ export async function PATCH(
   req: NextRequest,
   { params }: { params: Promise<{ path: string[] }> }
 ) {
+  if (!codeExecutionEnabled()) return codeExecutionDisabledResponse();
   const { path } = await params;
   const invalid = validatePath(path);
   if (invalid) return invalid;
@@ -84,6 +88,7 @@ export async function DELETE(
   req: NextRequest,
   { params }: { params: Promise<{ path: string[] }> }
 ) {
+  if (!codeExecutionEnabled()) return codeExecutionDisabledResponse();
   const { path } = await params;
   const invalid = validatePath(path);
   if (invalid) return invalid;

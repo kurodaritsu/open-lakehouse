@@ -33,6 +33,9 @@ function walkDir(dir: string): string[] {
 }
 
 export async function GET() {
+  // D6 / T-3.8: the entire pipelines feature (not just writes) is off unless
+  // code-execution is enabled — the disabled surface must not respond at all.
+  if (!codeExecutionEnabled()) return codeExecutionDisabledResponse();
   try {
     if (!existsSync(PIPELINES_DIR)) {
       return NextResponse.json({ specs: [], transformations: [] });
