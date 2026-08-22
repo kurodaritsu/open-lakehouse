@@ -51,6 +51,15 @@ a Phase-4 `PROVENANCE.md` section.
 changed), `.gitignore` (ignore the token-bearing `lakehouse.share` profile). The
 big doc rewrite stays in the Docs/CI PR (Phase 7).
 
+**Reset-engine integration (additive).** Because Delta Sharing reads
+`warehouse/sharing/`, `reset` now quiesces it: `reset_quiesce` stops sharing on
+data/metadata/all, and it is restarted on success via `share_restore` (reuse the
+existing token, `up -d` only — no re-mint, no rebuild). `cmd_stop` gains an
+internal `sharing)` arm for this; sharing stays out of `start all` / `stop all`,
+and `delta-sharing-certs` is a `never`-reset volume. A `tests/overlays/
+docker-compose-sharing.test.yml` + `OVERLAY_BASE_SERVICES` entry keep the test
+overlay renderer happy.
+
 **Security posture (D6):** 8443 binds to loopback by default; the bearer token is
 minted host-side (never a token the host can't know); the self-signed cert is a
 documented local caveat for clients; no cross-file `depends_on` (the CLI sequences
@@ -80,9 +89,8 @@ package proxy; the 2.77 GB image builds clean), on the Composed stack:
 
 ### Cloud-Databricks consumer — verified via a public tunnel
 
-The full external consumer flow was verified against a real Databricks workspace
-(e2-demo), with the sharing API + SeaweedFS exposed through cloudflared quick
-tunnels:
+The full external consumer flow was verified against a real Databricks workspace,
+with the sharing API + SeaweedFS exposed through cloudflared quick tunnels:
 
 - Registered the share as a UC Delta Sharing **provider** (TOKEN auth) from the
   tunnel profile; listed shares → schemas → tables; created a **catalog** from the
