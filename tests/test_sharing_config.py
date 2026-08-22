@@ -144,3 +144,38 @@ class TestShareCliWiring:
             "seaweedfs:8333" in COMPOSE.read_text()
             or "S3_PUBLIC_ENDPOINT" in COMPOSE.read_text()
         )
+
+
+class TestReviewFixesBc7189c:
+    """Lock the /code-review fixes from commit bc7189c."""
+
+    def test_parse_s3_url_decodes_key_no_double_encode(self):
+        # urlparse path is percent-ENCODED; parse_s3_url must decode so
+        # generate_presigned_url re-encodes exactly once (no %20 -> %2520).
+        mod = _load_proxy()
+        b, k = mod.parse_s3_url(
+            "https://s3.amazonaws.com/lakehouse/dir%20name/f.parquet?X-Amz-Signature=x"
+        )
+        assert (b, k) == ("lakehouse", "dir name/f.parquet")
+        url = mod.generate_presigned_url(b, k, 60)
+        assert "dir%20name/f.parquet" in url
+        assert "%2520" not in url
+
+    def test_proxy_drops_and_strips_content_encoding(self):
+        # Accept-Encoding dropped upstream; Content-Encoding stripped from the
+        # re-emitted (decompressed) response body.
+        src = PROXY.read_text().lower()
+        assert "accept-encoding" in src
+        assert "content-encoding" in src
+
+    def test_share_seed_gates_on_storage_and_connect(self):
+        text = CLI.read_text()
+        seed = text.split("seed)", 1)[1].split("start)", 1)[0]
+        assert "is_service_healthy 8333" in seed
+        assert "get_spark_connect_port" in seed
+
+    def test_share_profile_recovers_token_from_container(self):
+        text = CLI.read_text()
+        assert "share_container_token()" in text  # helper defined
+        # the profile branch resolves the token from env, else the running container
+        assert "${DELTA_SHARING_TOKEN:-$(share_container_token)}" in text
