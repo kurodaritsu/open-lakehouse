@@ -374,7 +374,7 @@ function NotebooksPageInner() {
   const [restartingKernel, setRestartingKernel] = useState(false);
   const [interruptingKernel, setInterruptingKernel] = useState(false);
 
-  const jupyterBaseUrl = "http://localhost:8888";
+  const jupyterBaseUrl = "http://localhost:8889";
 
   const fetchItems = useCallback(async (path: string) => {
     setLoading(true);

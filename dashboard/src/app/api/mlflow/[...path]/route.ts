@@ -4,7 +4,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 const MLFLOW_URL = () =>
-  process.env.MLFLOW_URL || "http://localhost:5000";
+  process.env.MLFLOW_URL || "http://mlflow-server:5000";
 
 async function proxy(req: NextRequest, path: string) {
   const baseUrl = MLFLOW_URL();

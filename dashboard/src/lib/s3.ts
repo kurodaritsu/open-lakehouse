@@ -5,10 +5,11 @@ import {
   S3Client,
   GetObjectCommand,
   PutObjectCommand,
+  HeadBucketCommand,
 } from "@aws-sdk/client-s3";
 import { requireEnv } from "./env";
 
-const BUCKET = "lakehouse-data";
+const BUCKET = process.env.S3_BUCKET || "lakehouse";
 const HISTORY_KEY = "pipeline-history/runs.json";
 
 let _client: S3Client | null = null;
@@ -17,7 +18,7 @@ function client(): S3Client {
   if (!_client) {
     _client = new S3Client({
       region: process.env.AWS_REGION || "us-east-1",
-      endpoint: process.env.MINIO_URL || "http://minio:9000",
+      endpoint: process.env.S3_ENDPOINT || "http://seaweedfs:8333",
       forcePathStyle: true,
       credentials: {
         accessKeyId: requireEnv("AWS_ACCESS_KEY_ID"),
@@ -26,6 +27,20 @@ function client(): S3Client {
     });
   }
   return _client;
+}
+
+/**
+ * Liveness probe for the object store: HEAD the lakehouse bucket. Returns true
+ * only when the S3 endpoint answers and the bucket exists. Used by
+ * /api/health/storage (SeaweedFS has no MinIO-style /minio/health/live path).
+ */
+export async function storageReachable(): Promise<boolean> {
+  try {
+    await client().send(new HeadBucketCommand({ Bucket: BUCKET }));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export interface RunHistoryEntry {

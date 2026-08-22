@@ -22,9 +22,9 @@ import type { ServiceHealth } from "@/lib/api";
 
 const services: Omit<ServiceHealth, "status">[] = [
   {
-    name: "MinIO",
-    url: "/api/minio/minio/health/live",
-    port: 9000,
+    name: "SeaweedFS",
+    url: "/api/health/storage",
+    port: 8333,
     description: "S3-compatible object storage",
   },
   {
@@ -40,20 +40,20 @@ const services: Omit<ServiceHealth, "status">[] = [
     description: "Experiment tracking & model registry",
   },
   {
-    name: "OpenSharing",
+    name: "Delta Sharing",
     url: "/api/health/delta-sharing",
     port: 8443,
-    description: "External data sharing protocol",
+    description: "External data sharing (optional service)",
   },
 ];
 
 const features = [
-  { icon: Database, label: "Unity Catalog", detail: "Three-level namespace governance", url: "http://localhost:8080", port: 8080 },
+  { icon: Database, label: "Unity Catalog", detail: "Three-level namespace governance", url: "http://localhost:8081", port: 8081 },
   { icon: Layers, label: "Delta Lake + Iceberg", detail: "ACID transactions, time travel", url: null, port: null },
   { icon: FlaskConical, label: "MLflow", detail: "Experiments, models, observability", url: "http://localhost:5000", port: 5000 },
-  { icon: Cpu, label: "Spark 4.1", detail: "Local or distributed compute", url: "http://localhost:8088", port: 8088 },
-  { icon: HardDrive, label: "MinIO Storage", detail: "S3-compatible, self-hosted", url: "http://localhost:9001", port: 9001 },
-  { icon: Share2, label: "OpenSharing", detail: "Secure external data sharing", url: "https://localhost:8443", port: 8443 },
+  { icon: Cpu, label: "Spark 4.1", detail: "Connect-first compute (sc://localhost:15002)", url: "http://localhost:8082", port: 8082 },
+  { icon: HardDrive, label: "SeaweedFS Storage", detail: "S3-compatible, self-hosted", url: null, port: null },
+  { icon: Share2, label: "Delta Sharing", detail: "Secure external data sharing (optional)", url: "https://localhost:8443", port: 8443 },
 ];
 
 export default function Dashboard() {
@@ -93,7 +93,7 @@ export default function Dashboard() {
       <div>
         <h1 className="text-2xl font-bold text-white">Platform Dashboard</h1>
         <p className="mt-1 text-sm text-slate-400">
-          Self-hosted open-source data lakehouse
+          Read-only viewer for the open-lakehouse platform
         </p>
       </div>
 
@@ -207,18 +207,16 @@ export default function Dashboard() {
             <div className="card">
               <div className="rounded-lg border border-slate-800 bg-surface-dark p-5">
                 <pre className="font-mono text-xs leading-relaxed text-slate-300">
-{`Jupyter Notebook (client, port 8888)
- │
-Apache Spark (local mode, or distributed via --profile cluster)
+{`Spark 4.1 (Connect server, sc://localhost:15002)
  │
 Unity Catalog OSS (governance, port 8080)
  │
 Delta Lake / Iceberg (table formats)
  │
-MinIO (S3-compatible storage, ports 9000/9001)
+SeaweedFS (S3-compatible storage, port 8333)
  │
 MLflow (experiment tracking & model registry, port 5000)
-OpenSharing Server (external sharing, port 8443)`}
+Delta Sharing (external sharing, port 8443 — optional)`}
                 </pre>
               </div>
             </div>
@@ -227,15 +225,15 @@ OpenSharing Server (external sharing, port 8443)`}
               <div className="card">
                 <p className="text-sm font-medium text-white">Compute</p>
                 <p className="mt-1 text-xs text-slate-400">
-                  Spark runs in <span className="font-mono text-emerald-300">local[*]</span> mode by default.
-                  Start distributed compute with <span className="font-mono text-emerald-300">make cluster</span>.
+                  Spark 4.1 runs Connect-first — clients connect to the Spark Connect
+                  server at <span className="font-mono text-emerald-300">sc://localhost:15002</span>.
                 </p>
               </div>
               <div className="card">
                 <p className="text-sm font-medium text-white">Storage</p>
                 <p className="mt-1 text-xs text-slate-400">
-                  All data stored in MinIO at <span className="font-mono text-emerald-300">s3a://lakehouse-data/</span>.
-                  Bind-mounted to <span className="font-mono text-emerald-300">data/minio/</span> on your machine.
+                  All data is stored in SeaweedFS at <span className="font-mono text-emerald-300">s3a://lakehouse/</span>,
+                  persisted in the <span className="font-mono text-emerald-300">seaweedfs-data</span> volume.
                 </p>
               </div>
               <div className="card">
@@ -255,10 +253,10 @@ OpenSharing Server (external sharing, port 8443)`}
         <h2 className="mb-4 text-lg font-semibold text-white">Quick Access</h2>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           {[
-            { label: "Jupyter Notebook", url: "http://localhost:8888", port: 8888 },
-            { label: "MinIO Console", url: "http://localhost:9001", port: 9001 },
+            { label: "Jupyter Notebook", url: "http://localhost:8889", port: 8889 },
+            { label: "Spark UI", url: "http://localhost:8082", port: 8082 },
             { label: "MLflow UI", url: "http://localhost:5000", port: 5000 },
-            { label: "Unity Catalog API", url: "http://localhost:8080", port: 8080 },
+            { label: "Unity Catalog API", url: "http://localhost:8081", port: 8081 },
           ].map((link) => (
             <a
               key={link.label}

@@ -150,7 +150,7 @@ export default function CatalogPage() {
             <div className="rounded-lg border border-slate-800/50 p-3">
               <p className="text-xs font-medium text-white">Automatic storage</p>
               <p className="mt-1 text-xs text-slate-400">
-                Tables are stored in MinIO at <code className="text-emerald-300">s3a://lakehouse-data/warehouse/</code> — no manual LOCATION needed.
+                Tables are stored in SeaweedFS at <code className="text-emerald-300">s3a://lakehouse/warehouse/</code> — no manual LOCATION needed.
               </p>
             </div>
             <div className="rounded-lg border border-slate-800/50 p-3">
@@ -198,7 +198,7 @@ export default function CatalogPage() {
         <ErrorCard
           message={error}
           onRetry={fetchData}
-          hint="Check if Unity Catalog is running with: make status"
+          hint="Check if Unity Catalog is running with: ./lakehouse status"
         />
       )}
 

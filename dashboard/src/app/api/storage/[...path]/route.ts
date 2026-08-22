@@ -3,12 +3,13 @@
 
 import { NextRequest, NextResponse } from "next/server";
 
-const MINIO_URL = () =>
-  process.env.MINIO_URL || "http://localhost:9000";
+// Read-only proxy to the S3-compatible object store (SeaweedFS). Renamed from
+// /api/minio (CP) to /api/storage since the backing store is no longer MinIO.
+const S3_ENDPOINT = () => process.env.S3_ENDPOINT || "http://seaweedfs:8333";
 
 async function proxy(req: NextRequest, path: string) {
   const query = req.nextUrl.search;
-  const url = `${MINIO_URL()}/${path}${query}`;
+  const url = `${S3_ENDPOINT()}/${path}${query}`;
 
   try {
     const res = await fetch(url, {
@@ -21,7 +22,7 @@ async function proxy(req: NextRequest, path: string) {
       headers: { "Content-Type": res.headers.get("Content-Type") || "text/plain" },
     });
   } catch {
-    return NextResponse.json({ error: "MinIO unreachable" }, { status: 502 });
+    return NextResponse.json({ error: "Object store unreachable" }, { status: 502 });
   }
 }
 

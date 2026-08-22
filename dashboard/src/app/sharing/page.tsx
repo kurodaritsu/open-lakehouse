@@ -337,7 +337,7 @@ export default function SharingPage() {
                 <pre className="font-mono text-xs leading-relaxed text-slate-300">
 {`Your Lakehouse                 OpenSharing Client
 ┌──────────────────┐           ┌───────────────────┐
-│  MinIO Storage   │           │   Databricks      │
+│  SeaweedFS       │           │   Databricks      │
 │  (Delta Tables)  │           │   Spark           │
 │       ↓          │           │   Pandas          │
 │  OpenSharing     │   HTTPS   │   PowerBI         │
@@ -354,7 +354,7 @@ export default function SharingPage() {
                   {[
                     {
                       title: "No data copying",
-                      desc: "Recipients read directly from your MinIO storage via pre-signed URLs. Data never leaves your infrastructure.",
+                      desc: "Recipients read directly from your object storage via pre-signed URLs. Data never leaves your infrastructure.",
                     },
                     {
                       title: "Real-time access",
@@ -404,20 +404,21 @@ export default function SharingPage() {
           {/* External access flow */}
           <div className="card">
             <h2 className="mb-4 text-sm font-semibold text-white">
-              External Access via Cloudflare Tunnels
+              External Access
             </h2>
             <p className="mb-4 text-xs text-slate-400">
-              For sharing data outside your network, the platform uses Cloudflare tunnels
-              to securely expose the OpenSharing server and MinIO storage. A URL re-signing
-              proxy rewrites pre-signed S3 URLs to point to the MinIO tunnel endpoint.
+              To share data outside your network, expose the Delta Sharing server and the
+              object store behind a public HTTPS endpoint (a reverse proxy, tunnel, or load
+              balancer — provisioning that is out of scope for this repo). A URL re-signing
+              proxy rewrites pre-signed S3 URLs to point at that public endpoint.
             </p>
             <div className="rounded-lg border border-slate-800 bg-surface-dark p-4">
               <pre className="font-mono text-xs leading-relaxed text-slate-300">
-{`1. make share              # Start Cloudflare tunnels
-2. Tunnel URLs assigned    # *.trycloudflare.com
-3. OpenSharing restarts    # With MINIO_PUBLIC_ENDPOINT set
-4. Profile generated       # delta-sharing-profile.share
-5. Upload to recipient     # Share the .share file`}
+{`1. ./lakehouse share start   # Start the sharing server + proxy
+2. Expose it publicly        # Public HTTPS endpoint (out of scope)
+3. Set S3_PUBLIC_ENDPOINT    # Point the proxy at that endpoint
+4. Profile generated         # lakehouse.share
+5. Upload to recipient       # Share the .share file`}
               </pre>
             </div>
           </div>
@@ -434,7 +435,7 @@ export default function SharingPage() {
             </h2>
             <p className="mb-4 text-xs text-slate-400">
               A share profile is a JSON file containing the endpoint and credentials.
-              Generate it with <code className="rounded bg-slate-800 px-1 py-0.5 text-emerald-300">make share</code> for
+              Generate it with <code className="rounded bg-slate-800 px-1 py-0.5 text-emerald-300">./lakehouse share start</code> for
               external access, or use the localhost version for local testing.
             </p>
             <CodeBlock
@@ -506,9 +507,9 @@ SELECT * FROM lakehouse_remote.default.products_example;`}
             </h2>
             <div className="space-y-3">
               {[
-                { label: "Start external sharing", cmd: "make share" },
-                { label: "Stop tunnels", cmd: "make share-stop" },
-                { label: "Check tunnel status", cmd: "make share-status" },
+                { label: "Start external sharing", cmd: "./lakehouse share start" },
+                { label: "Stop sharing", cmd: "./lakehouse share stop" },
+                { label: "Check sharing status", cmd: "./lakehouse share status" },
                 {
                   label: "Add a table to the share",
                   cmd: "# Edit docker/delta-sharing/server.yaml, then:\ndocker compose up -d --no-deps --force-recreate delta-sharing",

@@ -4,7 +4,7 @@
 import { NextResponse } from "next/server";
 
 export async function GET() {
-  const mlflowUrl = process.env.MLFLOW_URL || "http://localhost:5000";
+  const mlflowUrl = process.env.MLFLOW_URL || "http://mlflow-server:5000";
   const url = `${mlflowUrl}/health`;
   const dest = new URL(url);
 

@@ -4,7 +4,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 const UC_URL = () =>
-  process.env.UNITY_CATALOG_URL || "http://localhost:8080";
+  process.env.UNITY_CATALOG_URL || "http://unity-catalog:8080";
 
 async function proxy(req: NextRequest, path: string) {
   const query = req.nextUrl.search;

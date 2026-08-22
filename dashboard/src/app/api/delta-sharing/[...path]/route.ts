@@ -2,19 +2,28 @@
 // Copyright 2026 Containerized Lakehouse Platform Contributors
 
 import { NextRequest, NextResponse } from "next/server";
-import { requireEnv } from "@/lib/env";
 
 const DS_URL = () =>
   process.env.DELTA_SHARING_URL || "https://delta-sharing:8443";
-const DS_TOKEN = () => requireEnv("DELTA_SHARING_TOKEN");
 
 async function proxy(req: NextRequest, path: string) {
+  // Delta Sharing is an optional, separately-started service. When it isn't
+  // configured (no token), degrade gracefully rather than throwing a 500 so the
+  // Sharing page can render an "unconfigured" empty state.
+  const token = process.env.DELTA_SHARING_TOKEN;
+  if (!token) {
+    return NextResponse.json(
+      { items: [], status: "unconfigured" },
+      { status: 503 }
+    );
+  }
+
   const url = `${DS_URL()}/delta-sharing/${path}`;
   try {
     const res = await fetch(url, {
       method: req.method,
       headers: {
-        Authorization: `Bearer ${DS_TOKEN()}`,
+        Authorization: `Bearer ${token}`,
         "Content-Type": "application/json",
       },
       signal: AbortSignal.timeout(5000),

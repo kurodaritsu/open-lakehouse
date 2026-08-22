@@ -62,9 +62,9 @@ export default function Onboarding({ allServicesHealthy }: OnboardingProps) {
       done: allServicesHealthy,
     },
     {
-      label: "Open Jupyter & run the Quick Start notebook",
-      detail: "Launch 01_Quick_Start.ipynb to create your first table",
-      href: "http://localhost:8888",
+      label: "Open Jupyter & run a starter notebook",
+      detail: "Launch Jupyter to create your first table",
+      href: "http://localhost:8889",
       external: true,
       done: false,
     },

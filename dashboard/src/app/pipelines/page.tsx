@@ -118,11 +118,11 @@ libraries:
   - glob:
       include: transformations/**
 database: default
-storage: s3a://lakehouse-data/warehouse
+storage: s3a://lakehouse/warehouse
 configuration:
   spark.sql.shuffle.partitions: "4"
 
-  spark.hadoop.fs.s3a.endpoint: "http://minio:9000"
+  spark.hadoop.fs.s3a.endpoint: "http://seaweedfs:8333"
   spark.hadoop.fs.s3a.path.style.access: "true"
   spark.hadoop.fs.s3a.impl: "org.apache.hadoop.fs.s3a.S3AFileSystem"
   spark.hadoop.fs.s3a.connection.ssl.enabled: "false"
@@ -145,7 +145,7 @@ from pyspark.sql import functions as F
 
     if (t.tier === "bronze" && !t.source) {
       body = `    # TODO: Replace with your data source
-    # Example: spark.read.format("csv").load("s3a://lakehouse-data/raw/...")
+    # Example: spark.read.format("csv").load("s3a://lakehouse/raw/...")
     return spark.sql("SELECT 1 AS id, 'sample' AS value")`;
     } else if (t.source) {
       body = `    return (\n        spark.table("${t.source}")\n        # TODO: Add your transformations here\n    )`;
@@ -282,7 +282,7 @@ export default function PipelinesPage() {
   const [runMessage, setRunMessage] = useState<string | null>(null);
   const [fullRefresh, setFullRefresh] = useState(true);
 
-  // Run history (stored in MinIO)
+  // Run history (stored in the object store)
   const [history, setHistory] = useState<RunHistoryEntry[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [expandedRun, setExpandedRun] = useState<string | null>(null);
@@ -1205,10 +1205,10 @@ export default function PipelinesPage() {
                   </p>
                   <div className="flex items-center justify-between rounded-lg border border-slate-800 bg-surface-dark p-3">
                     <pre className="font-mono text-xs text-emerald-300">
-                      make pipelines-run
+                      spark-pipelines run
                     </pre>
                     <CopyButton
-                      text="make pipelines-run"
+                      text="spark-pipelines run"
                     />
                   </div>
                 </div>

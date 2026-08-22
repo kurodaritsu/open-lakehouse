@@ -15,7 +15,6 @@ import {
   Loader2,
   Search,
   ExternalLink,
-  HardDrive,
 } from "lucide-react";
 import { getExperiments, getExperimentRuns } from "@/lib/api";
 import type { MlflowExperiment, MlflowRun } from "@/lib/api";
@@ -92,16 +91,6 @@ export default function ExperimentsPage() {
             Open MLflow
             <ExternalLink size={14} />
           </a>
-          <a
-            href="http://localhost:9001/browser/lakehouse-data/mlflow/"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center gap-2 rounded-lg border border-slate-700 bg-surface-dark px-3 py-2 text-xs font-medium text-slate-300 transition-colors hover:border-slate-600 hover:text-white"
-            title="Browse MLflow artifacts in MinIO"
-          >
-            <HardDrive size={14} />
-            MinIO Console
-          </a>
         </div>
       </div>
 
@@ -109,7 +98,7 @@ export default function ExperimentsPage() {
         <ErrorCard
           message={error}
           onRetry={selectedExp ? () => selectExperiment(selectedExp) : fetchExperiments}
-          hint="Check if MLflow is running with: make status"
+          hint="Check if MLflow is running with: ./lakehouse status"
         />
       )}
 

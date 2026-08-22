@@ -8,8 +8,8 @@ export default defineConfig({
   test: {
     globals: true,
     environment: "node",
-    setupFiles: ["../tests/frontend/setup.ts"],
-    include: ["../tests/frontend/**/*.test.ts"],
+    setupFiles: ["./tests/setup.ts"],
+    include: ["./tests/**/*.test.ts"],
     alias: {
       "@": path.resolve(__dirname, "src"),
     },

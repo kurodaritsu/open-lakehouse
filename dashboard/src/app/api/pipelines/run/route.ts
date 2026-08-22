@@ -65,7 +65,7 @@ const SDP_CONF_LINES = [
   "spark.sql.extensions io.delta.sql.DeltaSparkSessionExtension",
   "spark.sql.catalog.spark_catalog org.apache.spark.sql.delta.catalog.DeltaCatalog",
   "spark.sql.sources.default delta",
-  "spark.sql.warehouse.dir s3a://lakehouse-data/warehouse",
+  "spark.sql.warehouse.dir s3a://lakehouse/warehouse",
 ];
 
 export async function POST(req: NextRequest) {
