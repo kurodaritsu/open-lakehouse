@@ -16,10 +16,14 @@ client ──HTTPS 8443──► url-rewriter-proxy.py ──HTTPS 8444──►
          (re-signs the presigned URLs in the server's JSON responses)
 ```
 
-One container (`delta-sharing`): `entrypoint.sh` launches the OpenSharing JVM
-server on internal **8444** and `exec`s the proxy on external **8443** (PID 1).
-Both use a self-signed cert generated at startup. The image is
-`eclipse-temurin:11` + the Delta Sharing 1.3.10 server JARs (fetched by coursier).
+One container (`delta-sharing`): `entrypoint.sh` (bash) is **PID 1**. It starts the
+OpenSharing JVM server on internal **8444** and the proxy on external **8443** as
+**background jobs**, installs a `trap` on SIGTERM/SIGINT (`cleanup()` kills both),
+and `wait`s on the proxy. It deliberately does **not** `exec` the proxy — `exec`
+would replace the shell and discard the trap, so on `docker stop` the Java server
+would be force-killed; with the `wait`+trap pattern, both stop cleanly. Both use a
+self-signed cert generated at startup. The image is `eclipse-temurin:11` + the
+Delta Sharing 1.3.10 server JARs (fetched by coursier).
 
 ## Why the proxy exists — the T-4.8 upstream signer bug
 
@@ -52,16 +56,24 @@ The proxy re-signs for `S3_PUBLIC_ENDPOINT` (the host the *client* will reach):
 ## CLI
 
 ```bash
-./lakehouse share seed      # write the shared tables (needs Spark Connect) — once
+./lakehouse share seed      # write the shared tables — needs storage (8333) AND Spark Connect
 ./lakehouse share start     # build + up, wait for 8443, write ./lakehouse.share
 ./lakehouse share status    # container + HTTP probe
 ./lakehouse share stop
 ./lakehouse share profile   # (re)write the client profile
 ```
 
+`share seed` gates on both SeaweedFS (8333, it boto3-clears the S3 prefix first)
+and Spark Connect, so a missing service gives a friendly error, not a raw traceback.
+
 `share start` mints a bearer token host-side if `DELTA_SHARING_TOKEN` is unset and
-passes it to the container, so the written profile matches the server (never lets
-the container mint a token the host can't know).
+passes it to the container **via Compose** (so it's a real container env var). Thus
+`share profile` in a fresh shell recovers it with
+`docker exec delta-sharing printenv DELTA_SHARING_TOKEN` (`share_container_token`) —
+this works precisely because the token is a Compose `environment:` value, not an
+entrypoint-only `export`. `reset` restarts sharing without re-minting or rebuilding
+(`share_restore`): it reuses the token from the env or the profile, and skips the
+restart if neither is available rather than let the entrypoint mint an unknowable one.
 
 ## What's shared + the seed
 
