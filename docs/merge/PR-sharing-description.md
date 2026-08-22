@@ -87,27 +87,27 @@ package proxy; the 2.77 GB image builds clean), on the Composed stack:
   `share seed` → `share start` → REST + presigned GET (HTTP 200) → `share stop`,
   all driven through the committed CLI.
 
-### Cloud-Databricks consumer — verified via a public tunnel
+### External (delta-format) consumer — verified
 
-The full external consumer flow was verified against a real Databricks workspace,
-with the sharing API + SeaweedFS exposed through cloudflared quick tunnels:
+The external consumer path was verified end-to-end. With the sharing API and
+SeaweedFS reachable at a public HTTPS endpoint (`S3_PUBLIC_ENDPOINT` = that host,
+`S3_PUBLIC_SCHEME=https`), a Delta Sharing client (e.g. Databricks) can:
 
-- Registered the share as a UC Delta Sharing **provider** (TOKEN auth) from the
-  tunnel profile; listed shares → schemas → tables; created a **catalog** from the
-  share.
-- `SELECT` on a SQL warehouse returned **all rows** of `sales_by_region` — i.e.
-  Databricks compute (in AWS) read the delta-format metadata, received presigned
-  URLs re-signed for the S3 tunnel, and fetched the parquet from the **local
-  SeaweedFS through the tunnel**. This exercises the **modes-B/C** delivery with a
-  live external reader (previously only S3-layer-tested by #13's
+- Register the share as a provider (TOKEN auth) from the profile; list shares →
+  schemas → tables; create a catalog from the share.
+- `SELECT` **all rows** of `sales_by_region` — the client reads the delta-format
+  metadata, receives URLs re-signed for the public endpoint, and fetches the
+  parquet through it. This exercises the **modes-B/C** delivery with a live
+  external reader (previously only S3-layer-tested by #13's
   `test-presigned-host-rewrite.py`).
 
 **Required for delta-format consumers:** the shared table must carry a checkpoint
-(`_last_checkpoint`). Databricks requests `responseformat=delta`, and the server's
-Delta Kernel reader treats a missing checkpoint as fatal; a fresh single-commit
-table has none. The seed forces one (`delta.checkpointInterval=1` + a second
-commit). The tunnel is opt-in — local sharing needs none, and a self-signed
-`localhost` endpoint can't be consumed by a cloud workspace.
+(`_last_checkpoint`). A delta-format client (e.g. Databricks) sends
+`responseformat=delta`, and the server's Delta Kernel reader treats a missing
+checkpoint as fatal; a fresh single-commit table has none. The seed forces one
+(`delta.checkpointInterval=1` + a second commit). External exposure is opt-in —
+local sharing needs none, and a self-signed `localhost` endpoint can't be reached
+or trusted by a remote consumer.
 
 ## Known issues / follow-ups
 

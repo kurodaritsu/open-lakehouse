@@ -113,10 +113,11 @@ skip TLS verification). For a quick check without a client, hit the REST API wit
   + a second commit). Any new shared table must do the same. The parquet-format
   path (`responseformat=parquet`, the default for a bare `curl`) tolerates the
   absence — so a `curl` test passing does NOT prove Databricks can read it.
-- **Consuming from cloud Databricks needs a public tunnel** (cloudflared) for both
-  the sharing API and SeaweedFS, plus `S3_PUBLIC_ENDPOINT`=the S3 tunnel host +
-  `S3_PUBLIC_SCHEME=https`. Verified working: provider → catalog → `SELECT` returns
-  rows (Databricks fetches parquet from local SeaweedFS via the tunnel, modes B/C).
+- **A remote consumer (e.g. Databricks)** needs the sharing API and SeaweedFS
+  reachable at a public HTTPS endpoint (any ingress — reverse proxy, tunnel, LB),
+  plus `S3_PUBLIC_ENDPOINT`=that host + `S3_PUBLIC_SCHEME=https`. Verified: provider
+  → catalog → `SELECT` returns rows (the client fetches parquet from SeaweedFS via
+  that endpoint, modes B/C). How you expose it is out of scope for this repo.
 - **No `depends_on: seaweedfs`** — storage is a separate compose file, so a
   cross-file depends_on would break `docker compose -f docker-compose-sharing.yml
   up`. The CLI sequences ordering (mirrors mlflow/airflow).

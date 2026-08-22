@@ -65,7 +65,7 @@ trailers to the CP authors; the SeaweedFS adaptation is Isaac's.
 | MinIO endpoint `minio:9000` | `seaweedfs:8333` | `server.yaml` hadoopConf + `core-site.xml` (fs.s3a/fs.s3/fs.s3n). |
 | CP env/placeholders `MINIO_ENDPOINT`, `MINIO_PUBLIC_SCHEME`, `__MINIO_*__` | `S3_PUBLIC_ENDPOINT`, `S3_PUBLIC_SCHEME`, `__S3_*__` | Matches the `seaweedfs-ops` skill; no MinIO exists here. |
 | CP shared tables (notebook-produced retail-gold + streaming/crypto_rates on `lakehouse-data`) | `sales_by_region`, `daily_revenue` on `s3a://lakehouse/warehouse/sharing/` | Replaced with a **self-contained seed** (`scripts/sharing/seed_shared_tables.py`) writing path-based Delta at fixed prefixes — verifiable in isolation, no notebook dependency. |
-| CP Cloudflare-tunnel-first sharing (`scripts/start-sharing.sh`) | **local-first** (`S3_PUBLIC_ENDPOINT=localhost:8333`, no `cloudflared`) | The `./lakehouse share` CLI serves locally out of the box; a public tunnel is an override. |
+| CP public-endpoint-first sharing (`scripts/start-sharing.sh`) | **local-first** (`S3_PUBLIC_ENDPOINT=localhost:8333`) | The `./lakehouse share` CLI serves locally out of the box; a public HTTPS endpoint is an override, and how it's exposed is out of scope for this repo. |
 | CP `docker-compose.yml` delta-sharing service | `docker-compose-sharing.yml` | Bridge network; loopback-bound 8443 (D6); no cross-file `depends_on`. |
 
 The upstream **T-4.8** presigned-URL signer bug (`delta-io/delta-sharing#753`, fix PR `#965`
