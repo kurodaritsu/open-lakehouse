@@ -404,3 +404,44 @@ class TestBackupRestoreSkipStorageVolumes:
         assert (
             "volume_restore" in body
         ), "sanity: restore_apply still restores non-storage volumes"
+
+
+# ---------------------------------------------------------------------------------
+# Notebooks lifecycle: `stop notebooks` existed but `start notebooks` did not, and
+# `reset` stopped Jupyter without restarting it (/code-review findings).
+# ---------------------------------------------------------------------------------
+
+
+class TestNotebooksLifecycle:
+    TEXT = LAKEHOUSE.read_text()
+
+    def _body(self, name: str) -> str:
+        m = re.search(rf"\n{name}\(\) \{{(.*?)\n\}}\n", self.TEXT, re.S)
+        assert m, f"function {name}() not found in lakehouse"
+        return m.group(1)
+
+    def test_cmd_start_accepts_notebooks(self):
+        body = self._body("cmd_start")
+        assert re.search(
+            r"\n\s+notebooks\)\s*\n", body
+        ), "cmd_start needs a notebooks) arm"
+        assert (
+            "|mlflow|notebooks)" in body
+        ), "notebooks must be in the cmd_start valid-set"
+        assert "notebooks|all]" in body, "the start usage string should list notebooks"
+
+    def test_start_notebooks_is_optin_not_in_all(self):
+        body = self._body("cmd_start")
+        # notebooks must NOT be bundled into a `start all` case arm (opt-in only).
+        assert (
+            "notebooks|all)" not in body and "all|notebooks)" not in body
+        ), "notebooks must be opt-in, not part of `start all`"
+
+    def test_reset_running_services_probes_jupyter(self):
+        body = self._body("reset_running_services")
+        assert (
+            "resolve_container_name jupyter" in body
+        ), "reset must detect a running Jupyter so it can restart it"
+        assert (
+            'up="$up notebooks"' in body
+        ), "reset_running_services must add 'notebooks' to the restart set"

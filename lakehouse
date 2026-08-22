@@ -835,10 +835,21 @@ cmd_start() {
     esac
 
     case $service in
-        storage|spark|kafka|all|unity-catalog|uc|airflow|mlflow)
+        notebooks)
+            # Opt-in only (deliberately NOT part of `start all`), mirroring `stop
+            # notebooks`. Needed so a Jupyter stopped via the CLI (or quiesced by
+            # `reset`) can be brought back — reset_restore_services calls `cmd_start`.
+            echo -e "${YELLOW}Starting notebooks (Jupyter)...${NC}"
+            overlay_set_compose_args notebooks || return 1
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d
+            ;;
+    esac
+
+    case $service in
+        storage|spark|kafka|all|unity-catalog|uc|airflow|mlflow|notebooks)
             ;;
         *)
-            echo "Usage: lakehouse start [storage|spark|kafka|airflow|unity-catalog|mlflow|all]"
+            echo "Usage: lakehouse start [storage|spark|kafka|airflow|unity-catalog|mlflow|notebooks|all]"
             exit 1
             ;;
     esac
@@ -1834,6 +1845,10 @@ reset_running_services() {
     is_container_running "$(resolve_container_name unity-catalog)" && up="$up unity-catalog" || true
     is_container_running "$(resolve_container_name airflow-webserver)" && up="$up airflow" || true
     is_container_running "$(resolve_container_name mlflow)" && up="$up mlflow" || true
+    # Jupyter is a writer reset_quiesce stops (reset_stop_services ... notebooks), so
+    # it must be in the restart set too — else a running Jupyter is left stopped after
+    # a successful reset. cmd_start now has a `notebooks` arm to bring it back.
+    is_container_running "$(resolve_container_name jupyter)" && up="$up notebooks" || true
     echo "$up"
     return 0
 }
@@ -2984,8 +2999,8 @@ Commands:
   preflight           Run preflight checks before starting services
   migrate [--dry-run] Run database schema migrations
   status [--json]     Show all service status (human or JSON)
-  start [service]     Start service (storage|spark|kafka|airflow|unity-catalog|mlflow|all)
-  stop [service]      Stop service (storage|spark|kafka|airflow|unity-catalog|mlflow|all)
+  start [service]     Start service (storage|spark|kafka|airflow|unity-catalog|mlflow|notebooks|all)
+  stop [service]      Stop service (storage|spark|kafka|airflow|unity-catalog|mlflow|notebooks|all)
   restart [service]   Restart service
   logs [service]      Tail logs (postgres|seaweedfs|spark-master|spark-worker|kafka|
                                   zookeeper|unity-catalog|mlflow|airflow-*)
