@@ -445,3 +445,24 @@ class TestNotebooksLifecycle:
         assert (
             'up="$up notebooks"' in body
         ), "reset_running_services must add 'notebooks' to the restart set"
+
+
+# ---------------------------------------------------------------------------------
+# The reset/backup dockerized aws-cli must be version-pinned (not :latest), matching
+# init-storage.sh / demos/_lib and the CLAUDE.md pin (/code-review finding).
+# ---------------------------------------------------------------------------------
+
+
+class TestAwsCliPinned:
+    TEXT = LAKEHOUSE.read_text()
+
+    def test_no_unpinned_aws_cli_latest(self):
+        assert (
+            "amazon/aws-cli:latest" not in self.TEXT
+        ), "the reset/backup dockerized aws-cli must be pinned (2.24.6), not :latest"
+
+    def test_aws_cli_pinned_and_overridable(self):
+        # aws_s3 and s3_sync both default to 2.24.6, still overridable via the env var.
+        assert (
+            self.TEXT.count("LAKEHOUSE_AWSCLI_IMAGE:-amazon/aws-cli:2.24.6") >= 2
+        ), "aws_s3 and s3_sync should default to amazon/aws-cli:2.24.6 (env-overridable)"
