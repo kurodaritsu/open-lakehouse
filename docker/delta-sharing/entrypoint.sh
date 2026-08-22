@@ -90,7 +90,7 @@ fi
 # Process aws-config: substitute the public S3 endpoint
 cp /opt/delta-sharing/conf/aws-config /opt/delta-sharing/runtime/aws-config
 sed -i \
-    -e "s|__S3_PUBLIC_ENDPOINT__|${S3_PUBLIC_ENDPOINT}|g" \
+    -e "s|__S3_PUBLIC_URL__|${S3_PUBLIC_SCHEME}://${S3_PUBLIC_ENDPOINT}|g" \
     /opt/delta-sharing/runtime/aws-config
 export AWS_CONFIG_FILE="/opt/delta-sharing/runtime/aws-config"
 
@@ -110,9 +110,10 @@ echo "  - Shares: lakehouse_share" >&2
 echo "  - Hadoop Config: $HADOOP_CONF_DIR" >&2
 echo "" >&2
 
-# Trap SIGTERM/SIGINT to cleanly stop background processes
+# Trap SIGTERM/SIGINT to cleanly stop both background processes.
 cleanup() {
     echo "Received shutdown signal, stopping..." >&2
+    [ -n "$PROXY_PID" ] && kill "$PROXY_PID" 2>/dev/null || true
     if [ -n "$DELTA_SHARING_PID" ]; then
         kill "$DELTA_SHARING_PID" 2>/dev/null || true
         wait "$DELTA_SHARING_PID" 2>/dev/null || true
@@ -148,6 +149,11 @@ if [ $attempt -ge $max_attempts ]; then
     echo "WARNING: Upstream server may not be fully ready" >&2
 fi
 
-# Start URL rewriter proxy on external port 8443 (foreground)
+# Start the URL rewriter proxy on external port 8443. Run it as a background job
+# and `wait` (NOT `exec`) so the SIGTERM/SIGINT trap above stays installed — `exec`
+# would replace this shell and discard the trap, leaving the Java server to be
+# force-killed on `docker stop`. This way cleanup() stops both processes.
 echo "Starting URL rewriter proxy on port 8443..." >&2
-exec python3 /usr/local/bin/url-rewriter-proxy.py
+python3 /usr/local/bin/url-rewriter-proxy.py &
+PROXY_PID=$!
+wait "$PROXY_PID"

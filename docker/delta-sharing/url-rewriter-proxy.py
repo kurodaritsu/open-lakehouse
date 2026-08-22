@@ -27,7 +27,7 @@ import re
 import ssl
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -152,19 +152,24 @@ def generate_presigned_url(bucket, key, expires_in=3600):
 
 
 def parse_s3_url(url):
-    """Extract bucket and key from various S3 URL formats"""
+    """Extract bucket and (percent-decoded) key from various S3 URL formats.
+
+    urlparse(...).path is NOT percent-decoded, so unquote the key before
+    returning it: generate_presigned_url re-encodes it once with quote(), and
+    re-quoting an already-encoded key would double-encode '%' (e.g. %20 -> %2520),
+    yielding a key that no longer matches the stored object.
+    """
     parsed = urlparse(url.split("?")[0])  # Remove query string
 
     # Virtual-hosted style: bucket.s3.amazonaws.com/key
     if ".s3.amazonaws.com" in parsed.hostname:
         bucket = parsed.hostname.split(".s3.amazonaws.com")[0]
-        key = parsed.path.lstrip("/")
-        return bucket, key
+        return bucket, unquote(parsed.path.lstrip("/"))
 
     # Path-style: s3.amazonaws.com/bucket/key or seaweedfs:8333/bucket/key
     path_parts = parsed.path.lstrip("/").split("/", 1)
     if len(path_parts) >= 2:
-        return path_parts[0], path_parts[1]
+        return path_parts[0], unquote(path_parts[1])
 
     return None, None
 
@@ -200,15 +205,21 @@ def rewrite_response_body(body, content_type):
 
     try:
         text = body.decode("utf-8")
-        original_text = text
 
-        # Find and re-sign all pre-signed S3 URLs
-        text = PRESIGNED_URL_PATTERN.sub(resign_url, text)
+        # Re-sign all pre-signed S3 URLs, counting via the substitution callback
+        # (avoids a second full-body regex scan just to log the count).
+        count = 0
 
-        if text != original_text:
-            count = len(PRESIGNED_URL_PATTERN.findall(original_text))
+        def _count_and_resign(match):
+            nonlocal count
+            count += 1
+            return resign_url(match)
+
+        text = PRESIGNED_URL_PATTERN.sub(_count_and_resign, text)
+
+        if count:
             logger.info(
-                f"✓ Re-signed {count} pre-signed URL(s) for tunnel: {S3_PUBLIC_ENDPOINT}"
+                f"✓ Re-signed {count} pre-signed URL(s) for endpoint: {S3_PUBLIC_ENDPOINT}"
             )
         return text.encode("utf-8")
     except Exception as e:
@@ -242,11 +253,19 @@ class ProxyHandler(BaseHTTPRequestHandler):
             content_length = int(self.headers.get("Content-Length", 0))
             body = self.rfile.read(content_length) if content_length > 0 else None
 
-            # Forward request to upstream (session has verify=False for self-signed cert)
+            # Forward request to upstream (session has verify=False for self-signed
+            # cert). Drop Accept-Encoding so the upstream returns identity: `requests`
+            # transparently decompresses response.content, and we re-emit that
+            # decompressed body — forwarding a gzip Content-Encoding over plaintext
+            # bytes would make the client fail to gunzip.
             response = _session.request(
                 method=self.command,
                 url=upstream_url,
-                headers={k: v for k, v in self.headers.items() if k.lower() != "host"},
+                headers={
+                    k: v
+                    for k, v in self.headers.items()
+                    if k.lower() not in ("host", "accept-encoding")
+                },
                 data=body,
                 allow_redirects=False,
                 timeout=60,
@@ -259,9 +278,16 @@ class ProxyHandler(BaseHTTPRequestHandler):
             content_type = response.headers.get("Content-Type", "")
             rewritten_body = rewrite_response_body(response.content, content_type)
 
-            # Forward response headers with corrected Content-Length
+            # Forward response headers with corrected Content-Length. Drop
+            # content-encoding too: `requests` already decompressed the body, so the
+            # bytes we emit are identity — keeping a gzip label would corrupt them.
             for key, value in response.headers.items():
-                if key.lower() in ["connection", "transfer-encoding", "content-length"]:
+                if key.lower() in (
+                    "connection",
+                    "transfer-encoding",
+                    "content-length",
+                    "content-encoding",
+                ):
                     continue
                 self.send_header(key, value)
             self.send_header("Content-Length", str(len(rewritten_body)))
@@ -287,7 +313,7 @@ def main():
     logger.info("=" * 60)
     logger.info(f"Upstream: https://{UPSTREAM_HOST}:{UPSTREAM_PORT}")
     logger.info(f"Proxy listening on: https://0.0.0.0:{PROXY_PORT}")
-    logger.info(f"SeaweedFS tunnel endpoint: https://{S3_PUBLIC_ENDPOINT}")
+    logger.info(f"SeaweedFS endpoint: {S3_PUBLIC_SCHEME}://{S3_PUBLIC_ENDPOINT}")
     logger.info(
         f"Re-signing: S3 pre-signed URLs → {S3_PUBLIC_ENDPOINT} (path-style, AWS v4)"
     )

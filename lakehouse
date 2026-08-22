@@ -3004,6 +3004,13 @@ cmd_resolve() {
 SHARING_PROFILE="${LAKEHOUSE_SHARING_PROFILE:-$PROJECT_ROOT/lakehouse.share}"
 share_endpoint() { echo "https://localhost:${DELTA_SHARING_PORT:-8443}/delta-sharing"; }
 
+# Read the bearer token from the running delta-sharing container (the source of
+# truth when `share start` minted a random one that isn't in the caller's env).
+share_container_token() {
+    docker exec "$(resolve_container_name delta-sharing)" \
+        printenv DELTA_SHARING_TOKEN 2>/dev/null || true
+}
+
 share_write_profile() {
     # Delta Sharing client profile. The token must match what the container runs
     # with (DELTA_SHARING_TOKEN, exported before `up`).
@@ -3026,6 +3033,12 @@ cmd_share() {
     case "$subcmd" in
         seed)
             header "SEEDING SHARED TABLES"
+            # The seed clears its S3 prefix (boto3 -> SeaweedFS) BEFORE Spark runs,
+            # so storage must be up too — else it dies with a raw botocore error.
+            if ! is_service_healthy 8333; then
+                echo -e "${RED}✗${NC} SeaweedFS (storage) not up — run './lakehouse start storage' first" >&2
+                return 1
+            fi
             if ! is_service_healthy "$(get_spark_connect_port)"; then
                 echo -e "${RED}✗${NC} Spark Connect not listening — run './lakehouse start spark' first" >&2
                 return 1
@@ -3067,11 +3080,15 @@ cmd_share() {
             fi
             ;;
         profile)
-            if [ -z "${DELTA_SHARING_TOKEN:-}" ]; then
-                echo -e "${RED}✗${NC} DELTA_SHARING_TOKEN not set — start with './lakehouse share start' or set it in .env" >&2
+            # Resolve the token from the env, else read it back from the running
+            # container — so `share profile` works in a fresh shell even when
+            # `share start` minted a random token (which lives only in the container).
+            local token="${DELTA_SHARING_TOKEN:-$(share_container_token)}"
+            if [ -z "$token" ]; then
+                echo -e "${RED}✗${NC} No token: set DELTA_SHARING_TOKEN, or start the server first ('./lakehouse share start')" >&2
                 return 1
             fi
-            share_write_profile "$DELTA_SHARING_TOKEN"
+            share_write_profile "$token"
             ;;
         *)
             echo "Usage: lakehouse share [seed|start|stop|status|profile]"
