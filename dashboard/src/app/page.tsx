@@ -68,12 +68,12 @@ const services: Omit<ServiceHealth, "status">[] = [
 ];
 
 const features = [
-  { icon: Database, label: "Unity Catalog", detail: "Three-level namespace governance", url: "http://localhost:8081/api/2.1/unity-catalog/catalogs", port: 8081 },
+  { icon: Database, label: "Unity Catalog", detail: "Three-level namespace governance", url: "http://localhost:3001", port: 3001 },
   { icon: Layers, label: "Delta Lake + Iceberg", detail: "ACID transactions, time travel", url: null, port: null },
   { icon: FlaskConical, label: "MLflow", detail: "Experiments, models, observability", url: "http://localhost:5000", port: 5000 },
   { icon: Cpu, label: "Spark 4.1", detail: "Connect-first compute (sc://localhost:15002)", url: "http://localhost:8082", port: 8082 },
   { icon: HardDrive, label: "SeaweedFS Storage", detail: "S3-compatible, self-hosted", url: null, port: null },
-  { icon: Share2, label: "Delta Sharing", detail: "Secure external data sharing (optional)", url: "https://localhost:8443", port: 8443 },
+  { icon: Share2, label: "Delta Sharing", detail: "Secure external data sharing (optional)", url: "/sharing", port: null },
   { icon: Radio, label: "Kafka", detail: "Event streaming (TCP 9092 — no web UI)", url: null, port: 9092 },
   { icon: Workflow, label: "Airflow", detail: "Workflow orchestration (optional)", url: "http://localhost:8085", port: 8085 },
 ];

@@ -584,6 +584,7 @@ cmd_status_human() {
     echo "  PostgreSQL:       5432"
     echo "  SeaweedFS:        8333"
     echo "  Unity Catalog:    8081 (REST API + Iceberg endpoint)"
+    echo "  Unity Catalog UI: 3001 (web UI)"
     echo "  Spark 4.1:        7078, 8082 (UI), 8083 (Worker UI)"
     echo "  Spark Connect:    15002 (gRPC)"
     echo "  Kafka:            9092"
