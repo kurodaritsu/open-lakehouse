@@ -1,0 +1,90 @@
+# PR — Delta Sharing (Phase 4)
+
+Adds **Delta Sharing** to the stack: the OpenSharing reference server plus a
+`url-rewriter-proxy` that re-signs its presigned URLs for SeaweedFS, wired in as
+an opt-in `./lakehouse share` command. Ported from the containerized lakehouse
+platform and adapted to open-lakehouse (SeaweedFS, the `lakehouse` bucket,
+Connect-first).
+
+Base: `feat/net-bridge-conversion` (PR #13) @ `f72ff2f` — a sibling in the CP
+feature fan (`docs/merge/PR-fan-strategy.md`), not based on any other feature PR.
+Purely additive: no existing service changes behavior.
+
+## What's in it
+
+- **`docker/delta-sharing/`** — the OpenSharing server + `url-rewriter-proxy.py`
+  + configs, imported verbatim (commit 1, `Co-authored-by` the CP authors) then
+  repointed to SeaweedFS (commit 2).
+- **`docker-compose-sharing.yml`** — the `delta-sharing` service on the shared
+  bridge network, HTTPS **8443** bound to `127.0.0.1` by default (D6).
+- **`./lakehouse share`** — `seed | start | stop | status | profile`; an opt-in
+  command, deliberately **not** part of `start all`. Minimal `status --json`
+  (`delta_sharing`), help, and port additions only.
+- **`scripts/sharing/seed_shared_tables.py`** — a self-contained seed writing two
+  path-based Delta tables to fixed prefixes, so the demo is verifiable in isolation.
+- **`tests/test_sharing_config.py`** — static proxy checks, SeaweedFS-repoint
+  guards, and the re-sign logic exercised offline. **`.claude/skills/delta-sharing/`.**
+
+## The interesting part — why a re-signing proxy (T-4.8)
+
+The OpenSharing server generates the presigned S3 URLs clients fetch, but has an
+**upstream bug**: `CloudFileSigner.scala` constructs `S3ClientCreationParameters()`
+empty, so Hadoop's factory ignores `fs.s3a.endpoint` and always signs for
+`s3.amazonaws.com` — breaking every S3-compatible store. Upstream
+`delta-io/delta-sharing#753`; the 7-line fix PR `#965` is stalled awaiting review.
+
+The proxy is the sanctioned workaround: it intercepts the server's JSON responses
+and computes a **fresh SigV4 signature** for the real endpoint (a naive host swap
+would invalidate the signature, since SigV4 covers `host`). This reconciles with
+PR #13's SeaweedFS presigned host-rewrite contract (`seaweedfs-ops` §2.2): for the
+local path the signed host equals the delivered host (plain SigV4); for a public
+tunnel, SeaweedFS verifies via modes B/C. Full rationale in the `delta-sharing` skill.
+
+## Blast radius
+
+**Additive / new:** `docker/delta-sharing/`, `docker-compose-sharing.yml`,
+`scripts/sharing/`, `tests/test_sharing_config.py`, `.claude/skills/delta-sharing/`,
+a Phase-4 `PROVENANCE.md` section.
+
+**Shared files touched (minimal, additive):** `lakehouse` (a `share` command +
+`cmd_share`, a `delta_sharing` status entry, help/port lines — no existing arm
+changed), `.gitignore` (ignore the token-bearing `lakehouse.share` profile). The
+big doc rewrite stays in the Docs/CI PR (Phase 7).
+
+**Security posture (D6):** 8443 binds to loopback by default; the bearer token is
+minted host-side (never a token the host can't know); the self-signed cert is a
+documented local caveat for clients; no cross-file `depends_on` (the CLI sequences
+storage).
+
+## Verification
+
+Verified live on a **fresh image build** (coursier/Maven + pip via a build-arg
+package proxy; the 2.77 GB image builds clean), on the Composed stack:
+
+- `tests/test_sharing_config.py`: **11 passed** (offline — the re-sign logic,
+  repoint guards, and CLI wiring).
+- **Seed:** 5 + 7 rows, re-run idempotent, `_delta_log` + parquet in SeaweedFS at
+  both prefixes.
+- **`./lakehouse share start`** → server healthy on HTTPS 8443; profile written.
+- **Delta Sharing REST protocol end-to-end:** `shares` → `schemas` → `tables` →
+  `query`. The query's `file.url` entries point at `localhost:8333` (SeaweedFS),
+  **not** `s3.amazonaws.com` — i.e. the proxy re-signed them with a fresh
+  `X-Amz-Credential=lakehouse_s3` SigV4 signature (the T-4.8 workaround).
+- **Re-signed presigned GET → HTTP 200** with real parquet (`PAR1`, 1009 bytes)
+  from SeaweedFS: the fresh signature verifies against the local store.
+- **`./lakehouse share stop`** tears the service down cleanly.
+
+## Known issues / follow-ups
+
+- **Self-signed cert.** Delta Sharing clients must trust it or skip TLS
+  verification; a proper cert / a documented trust step is a follow-up.
+- **T-4.8 is upstream-unresolved.** The proxy is required until `#965` lands; then
+  the proxy could be dropped and the server pointed straight at SeaweedFS.
+- **Build needs a package proxy** in restricted networks — the image build honors
+  `MAVEN_REPO_URL` / `PIP_INDEX_URL` build-args (public defaults committed).
+- **Delta Sharing notebooks (T-5.4)** fold into `demos/delta-sharing/` after this
+  PR and the Demos PR both merge.
+
+---
+
+This pull request and its description were written by Isaac.
