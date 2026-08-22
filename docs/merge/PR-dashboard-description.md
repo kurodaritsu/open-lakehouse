@@ -46,6 +46,34 @@ Read the risky diffs (4, 5) without wading through the ~11k-line bulk import.
 - **No internal specifics:** the sharing page's external-access section is
   tool-agnostic (no cloudflared / tunnel names; `./lakehouse share *`).
 
+## Decision points (please weigh in)
+
+1. **Code-execution posture — one env var; routes present-but-inert, NOT stripped.**
+   With `DASHBOARD_ALLOW_CODE_EXECUTION` off (the default), the whole pipelines /
+   notebooks / jupyter-exec surface still *exists and responds*, but returns `403`
+   as the **first line** of each handler — before any code execution, outbound
+   Jupyter call, shell, or filesystem write. The capability is therefore inert, but
+   the endpoints are **not physically absent**: a direct request gets
+   `403 {"error":"disabled"}`, not a `404` or connection-refused. (This is inherent
+   to Next.js file-based routing — a `route.ts` is always mounted while the server
+   runs; there is no separate per-feature port, and the container publishes only
+   `127.0.0.1:3000`.)
+   - *Why this way:* re-enabling for a demo is a single
+     `DASHBOARD_ALLOW_CODE_EXECUTION=true` flip, not a re-port, and the gate is
+     enforced **server-side** (proven by direct-HTTP integration tests) — it is not
+     UI hiding. Only the exact string `"true"` enables it.
+   - *Alternative not taken:* physically **stripping** the routes (genuine `404`,
+     no handler at all) — smallest surface, but removes the toggle and means
+     re-porting to bring the feature back.
+   - *Revisit when:* the dashboard gains its own authentication, or a build with no
+     code-execution code at all is wanted → switch to stripping.
+2. **Read-only by default, opt-in service** — a UC/MLflow/S3 viewer, not started by
+   `./lakehouse start all` (D8 neutrality). OK to keep opt-in?
+3. **`package-lock.json` pinned to the public registry** — CP's lock resolved
+   through an internal build-proxy; rewritten to `registry.npmjs.org` (integrity
+   hashes unchanged) and scrubbed from history. The proxy is supplied only at build
+   time via `--build-arg NPM_REGISTRY`.
+
 ## Blast radius
 
 Almost entirely new files (`dashboard/`, `docker-compose-dashboard.yml`,
@@ -59,12 +87,18 @@ existing service (Option-A §4 "purely additive").
 
 - `tests/test_dashboard_config.py` (5 tests, `pytest -m dashboard`): port
   contract, env-var contract (U-25), code-execution-off-by-default (U-26 / D6),
-  neutrality (U-38 / D8), core-compose isolation. Green.
-- Vitest (`dashboard/tests/**`) including F-08 (traversal → 400) and F-10
-  (flag gating).
+  neutrality (U-38 / D8), core-compose isolation.
+- Vitest `dashboard/tests/**` — 69 tests, incl. F-08 (traversal → 400) and F-10
+  (19 flag-gating cases: every gated route 403 when off; flag strictness — only
+  exact `"true"` enables).
+- `tests/integration/test_dashboard.py` (`integration`+`dashboard` markers; skips
+  when the container is down): every gated route hit **directly over HTTP** → 403
+  when off (API-layer enforcement, not UI hiding); read-only reachability
+  (I-16…I-19); asserts the container publishes **only `127.0.0.1:3000`**.
 - `bash -n` + `shellcheck` clean on the CLI; base and run-scoped overlay both
   render via `docker compose config`.
-- Full E2E (docker build via npm proxy + `./lakehouse start dashboard` on the live
-  stack + browser walk-through + flag both ways) — see the PR checklist.
+- Verified live **both ways**: flag OFF → 8/8 integration pass (all gated routes
+  403); flag ON → the gate un-gates. Full docker build (npm proxy) +
+  `./lakehouse start dashboard` on the live stack + browser walk-through; `tsc` clean.
 
 This pull request and its description were written by Isaac.
