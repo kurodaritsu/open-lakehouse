@@ -81,15 +81,31 @@ Read the risky diffs (4, 5) without wading through the ~11k-line bulk import.
    through an internal build-proxy; rewritten to `registry.npmjs.org` (integrity
    hashes unchanged) and scrubbed from history. The proxy is supplied only at build
    time via `--build-arg NPM_REGISTRY`.
+4. **The Unity Catalog OSS web UI is enabled in the core UC service** (see Blast
+   radius). It publishes no versioned release, so it's pinned to a rolling main
+   build (`unitycatalog-ui:main-aadc6fc`) on host `3001`, reached via a `server`
+   network alias the UI's proxy hardcodes. *Alternative:* keep it out of the core
+   UC service and link the dashboard's UC card to the in-app `/catalog` page
+   instead. *Revisit if:* a `main`-tagged image or an extra container in the
+   default `start unity-catalog` is unwanted.
 
 ## Blast radius
 
 Almost entirely new files (`dashboard/`, `docker-compose-dashboard.yml`,
-`.claude/skills/dashboard/`, `tests/test_dashboard_config.py`, the test overlay).
+`.claude/skills/dashboard/`, `tests/test_dashboard_config.py`, `tests/integration/test_dashboard.py`, the test overlay).
 Shared touch-points are additive only: the `lakehouse` CLI (opt-in `dashboard`
 arms + `status --json`), `scripts/lib/overlay.sh` (`OVERLAY_BASE_SERVICES`), and a
-Phase-3 section appended to `docs/merge/PROVENANCE.md`. No behavior change to any
-existing service (Option-A §4 "purely additive").
+Phase-3 section appended to `docs/merge/PROVENANCE.md`.
+
+**One deliberate exception to "purely additive":** this PR also **enables the
+Unity Catalog OSS web UI** (`docker-compose-unity-catalog.yml` — previously a
+commented-out stub), so `./lakehouse start unity-catalog` now also starts a
+`unity-catalog-ui` container (host `3001`; UC exposed under a `server` network
+alias the UI's proxy requires; run-scoped in the UC test overlay). This is what
+makes the dashboard's "Unity Catalog" card open a real UC UI rather than the
+API root's "Hello, Unity Catalog!" greeting. If a reviewer prefers to keep the
+UI out of the core UC service, the fallback is to link the card to the in-app
+`/catalog` page instead — see Decision points.
 
 ## Verification
 
