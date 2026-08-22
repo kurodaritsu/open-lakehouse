@@ -112,6 +112,40 @@ for a maintainer decision rather than changing lifecycle behavior here:
   rename/annotate the reset target, or clarify the rule to mean "no JDBC catalog on
   the Spark read/write path").
 
+### Review fixes applied on this branch (lifecycle-engine findings)
+
+A later `/code-review` pass surfaced defects in the reset/backup/lifecycle engine. These
+are fixed **here on `feat/net-bridge-conversion`** (the live trunk the demo/feature fan
+stacks on) rather than cascaded through the owner-controlled PR #12 →
+`feat/merge-cp-integration` → this branch. Most originate in PR #12's lifecycle code
+(`git blame`: reset engine `12afac8`, backup/restore engine `eac890d`); the notebooks
+start/stop asymmetry originates here in PR #13 (`da31b8c` added `stop notebooks` with no
+matching `start`). **They can be cherry-picked onto PR #12** if the owner prefers them on
+the standalone lifecycle PR.
+
+- **Backup/restore no longer wipe the live storage volumes (HIGH).** `backup_take_snapshot`
+  / `restore_apply` swept in `postgres-data` / `seaweedfs-data`, whose services stay live
+  (excluded from `backup_writer_containers`), so a restore ran `rm -rf` + tar over the running
+  metastore/object store. Both now skip `reset_volume_mode == "never"` volumes (backup by base
+  name; restore by effective/project-prefixed name, as the MANIFEST stores them); their content
+  is captured/restored via `pg_dump` + `s3 sync`. (Origin PR #12 `eac890d`; the bug only
+  manifested once PR #13 moved storage into Compose.)
+- **`start notebooks` + Jupyter-after-reset.** `cmd_start` gained a `notebooks` arm (opt-in,
+  not in `start all`), and `reset_running_services` now restarts a previously-running Jupyter.
+  (Asymmetry origin PR #13 `da31b8c`; the reset half PR #12 `12afac8`.)
+- **aws-cli pinned.** The reset/backup dockerized aws-cli defaulted to `:latest`; pinned to
+  `2.24.6` (still `LAKEHOUSE_AWSCLI_IMAGE`-overridable), matching `init-storage.sh` /
+  `demos/_lib`. (Origin PR #12.)
+- **`reset --data` residual check — left as-is, intentionally.** The review flagged that the
+  post-delete residual-key count could fail on SeaweedFS directory markers. Measured: a
+  torn-down prefix shows **0 objects** via S3 `ListObjects` (SeaweedFS filer directories are not
+  S3-visible), so the count-based fail-stop is not tripped by them. A visible undeletable marker
+  only arises from a raw FileOutputCommitter `_temporary/` object, which this stack's Delta
+  writes avoid — so the safety fail-stop is **not weakened**.
+
+Regression tests for the applied fixes: `tests/test_pr13_review_fixes.py`
+(`TestBackupRestoreSkipStorageVolumes`, `TestNotebooksLifecycle`, `TestAwsCliPinned`).
+
 ## Verification
 
 See the "before PR #13 leaves draft" gate report in the session log: 183 unit
