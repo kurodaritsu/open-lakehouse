@@ -113,6 +113,15 @@ class TestReadOnlyReachable:
             "expected at least one Unity Catalog catalog"
         )
 
+    def test_all_health_endpoints_wellformed(self):
+        """Every service surfaced on the home page has a health probe that returns
+        a well-formed status (healthy when up, unhealthy/unknown when down) — so
+        the dashboard reflects the whole stack, not just the 4 data services."""
+        allowed = {"healthy", "unhealthy", "unknown", "unconfigured"}
+        for svc in ["storage", "mlflow", "spark", "airflow", "ai-gateway", "delta-sharing"]:
+            _, data = _get_json(f"/api/health/{svc}")
+            assert data and data.get("status") in allowed, f"/api/health/{svc}: {data}"
+
 
 # --- The core ask: API-layer enforcement, not front-end hiding ------------------
 

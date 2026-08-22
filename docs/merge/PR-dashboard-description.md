@@ -14,6 +14,14 @@ Vitest 3.0). It is a **viewer**, not a control plane — it reads UC / MLflow / 
 and never writes to the warehouse in its default posture (D8 scope honesty). It
 is **opt-in**: `./lakehouse start all` does not start it.
 
+The home page surfaces a **health card for every OL service** (SeaweedFS, Unity
+Catalog, MLflow, Delta Sharing, Spark, Airflow, AI Gateway), a Kafka info card
+(TCP 9092, no web UI), and "open UI" links (Jupyter, Spark UI, MLflow, UC,
+Airflow). Dedicated *nav pages* exist only for the data-plane services that CP
+shipped (Catalog, Experiments, Storage, Sharing + gated Pipelines/Notebooks);
+Kafka/Airflow/Spark keep their own UIs and are surfaced as health + link only —
+see Decision points.
+
 ```bash
 ./lakehouse start dashboard      # first run builds the image; serves 127.0.0.1:3000
 ./lakehouse stop dashboard

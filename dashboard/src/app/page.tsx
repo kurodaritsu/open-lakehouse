@@ -12,6 +12,8 @@ import {
   Layers,
   Cpu,
   BookOpen,
+  Radio,
+  Workflow,
   ChevronDown,
   ChevronUp,
   ExternalLink,
@@ -45,6 +47,24 @@ const services: Omit<ServiceHealth, "status">[] = [
     port: 8443,
     description: "External data sharing (optional service)",
   },
+  {
+    name: "Spark 4.1",
+    url: "/api/health/spark",
+    port: 8082,
+    description: "Compute — standalone master + Connect",
+  },
+  {
+    name: "Airflow",
+    url: "/api/health/airflow",
+    port: 8085,
+    description: "Orchestration (optional service)",
+  },
+  {
+    name: "AI Gateway",
+    url: "/api/health/ai-gateway",
+    port: 5001,
+    description: "MLflow AI Gateway (optional service)",
+  },
 ];
 
 const features = [
@@ -54,6 +74,8 @@ const features = [
   { icon: Cpu, label: "Spark 4.1", detail: "Connect-first compute (sc://localhost:15002)", url: "http://localhost:8082", port: 8082 },
   { icon: HardDrive, label: "SeaweedFS Storage", detail: "S3-compatible, self-hosted", url: null, port: null },
   { icon: Share2, label: "Delta Sharing", detail: "Secure external data sharing (optional)", url: "https://localhost:8443", port: 8443 },
+  { icon: Radio, label: "Kafka", detail: "Event streaming (TCP 9092 — no web UI)", url: null, port: 9092 },
+  { icon: Workflow, label: "Airflow", detail: "Workflow orchestration (optional)", url: "http://localhost:8085", port: 8085 },
 ];
 
 export default function Dashboard() {
@@ -257,6 +279,7 @@ Delta Sharing (external sharing, port 8443 — optional)`}
             { label: "Spark UI", url: "http://localhost:8082", port: 8082 },
             { label: "MLflow UI", url: "http://localhost:5000", port: 5000 },
             { label: "Unity Catalog API", url: "http://localhost:8081", port: 8081 },
+            { label: "Airflow UI", url: "http://localhost:8085", port: 8085 },
           ].map((link) => (
             <a
               key={link.label}

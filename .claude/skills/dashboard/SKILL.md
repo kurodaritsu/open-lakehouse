@@ -74,7 +74,15 @@ in force regardless of the flag.
 | `/api/delta-sharing/*` | `delta-sharing:8443` | optional; `503 unconfigured` when no token |
 | `/api/jupyter/*` | `jupyter:8888` | notebook browsing |
 | `/api/health/{storage,mlflow,delta-sharing}` | — | health probes; storage HEADs the bucket |
+| `/api/health/{spark,airflow,ai-gateway}` | — | health probes for the rest of the stack (Spark master UI, Airflow API server, MLflow AI Gateway) |
 | `/api/features` | — | read-only; reports whether code-execution is enabled |
+
+The home page surfaces a health card for **every** OL service — SeaweedFS, Unity
+Catalog, MLflow, Delta Sharing, Spark, Airflow, and the AI Gateway — plus an info
+card for Kafka (TCP 9092, no web UI) and "open UI" links (Jupyter, Spark UI, MLflow,
+UC, Airflow). Optional services that aren't started show as unhealthy/unknown; that
+is expected. There are no dedicated nav pages for Kafka/Airflow/Spark — they have
+their own UIs; the dashboard only shows health + a link (scope decision, see the PR).
 
 Client "open UI" links point at host ports: UC `8081`, MLflow `5000`, Spark UI `8082`,
 Jupyter `8889`, Delta Sharing `8443`.
