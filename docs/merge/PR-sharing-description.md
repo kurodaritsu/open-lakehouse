@@ -70,16 +70,34 @@ package proxy; the 2.77 GB image builds clean), on the Composed stack:
   `query`. The query's `file.url` entries point at `localhost:8333` (SeaweedFS),
   **not** `s3.amazonaws.com` — i.e. the proxy re-signed them with a fresh
   `X-Amz-Credential=lakehouse_s3` SigV4 signature (the T-4.8 workaround).
-- **Re-signed presigned GET → HTTP 200** with real parquet (`PAR1`, 1009 bytes)
-  from SeaweedFS: the fresh signature verifies against the local store.
+- **Re-signed presigned GET → HTTP 200** with real parquet (`PAR1`) from SeaweedFS:
+  the fresh signature verifies against the local store.
 - **`./lakehouse share stop`** tears the service down cleanly.
+- **Re-verified from a full cold teardown** — `stop all` + `stop storage` (all
+  containers down, volumes preserved) → `start storage` + `start spark` →
+  `share seed` → `share start` → REST + presigned GET (HTTP 200) → `share stop`,
+  all driven through the committed CLI.
+
+### Not verified (scoped out / follow-ups)
+
+- **No real Databricks consumer test.** Verification is the *local* REST +
+  presigned-GET data plane via `curl`. Reading the share from a Databricks
+  workspace is untested and not possible with the local-first defaults (server on
+  `localhost:8443` with a self-signed cert — a cloud workspace can neither reach
+  nor trust it). It requires the public-tunnel path (below) + a workspace.
+- **The tunnel / modes-B/C delivery path is only validated at the S3 layer** (PR
+  #13's `test-presigned-host-rewrite.py`, S-07/S-08) — not with a live external
+  reader. The local path tested here is the simpler signed-host == delivered-host
+  case.
 
 ## Known issues / follow-ups
 
 - **Self-signed cert.** Delta Sharing clients must trust it or skip TLS
   verification; a proper cert / a documented trust step is a follow-up.
-- **T-4.8 is upstream-unresolved.** The proxy is required until `#965` lands; then
-  the proxy could be dropped and the server pointed straight at SeaweedFS.
+- **T-4.8 is upstream-unresolved** (verified 2026-08-22: `delta-io/delta-sharing#753`
+  OPEN; fix PR `#965` OPEN/unmerged, last activity 2026-06-25). The proxy is
+  required until `#965` lands; then it could be dropped and the server pointed
+  straight at SeaweedFS.
 - **Build needs a package proxy** in restricted networks — the image build honors
   `MAVEN_REPO_URL` / `PIP_INDEX_URL` build-args (public defaults committed).
 - **Delta Sharing notebooks (T-5.4)** fold into `demos/delta-sharing/` after this
