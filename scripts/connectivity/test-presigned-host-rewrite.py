@@ -35,7 +35,7 @@ ENDPOINT = os.environ.get("S3_ENDPOINT", "http://localhost:8333")
 ACCESS = os.environ.get("S3_ACCESS_KEY", "lakehouse_s3")
 SECRET = os.environ.get("S3_SECRET_KEY", "lakehouse_s3_secret")
 BUCKET = os.environ.get("S3_BUCKET", "lakehouse")
-PUBLIC_HOST = os.environ.get("PRESIGN_PUBLIC_HOST", "my-tunnel.trycloudflare.com")
+PUBLIC_HOST = os.environ.get("PRESIGN_PUBLIC_HOST", "my-sharing-host.example.com")
 KEY = f"_conformance/host-rewrite/{uuid.uuid4().hex[:12]}.bin"
 PAYLOAD = b"presigned-host-rewrite-payload"
 
@@ -65,7 +65,8 @@ def main() -> int:
     _client(ENDPOINT).put_object(Bucket=BUCKET, Key=KEY, Body=PAYLOAD)
 
     # 2. Presign a GET as if the store lived at the PUBLIC host (https, no port —
-    #    so the signed Host header is the bare hostname, like cloudflared).
+    #    so the signed Host header is the bare hostname, like a public reverse
+    #    proxy / tunnel fronting the local store).
     public = _client(f"https://{PUBLIC_HOST}")
     signed = public.generate_presigned_url(
         "get_object", Params={"Bucket": BUCKET, "Key": KEY}, ExpiresIn=300
