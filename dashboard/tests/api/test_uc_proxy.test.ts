@@ -75,24 +75,24 @@ describe("UC Proxy (/api/uc/[...path])", () => {
     );
   });
 
-  it("proxies POST requests with body", async () => {
-    vi.mocked(global.fetch).mockResolvedValueOnce(
-      new Response(JSON.stringify({ name: "new_catalog" }), {
-        status: 200,
-        headers: { "Content-Type": "application/json" },
-      })
-    );
-
+  it("is read-only: does not export a mutating POST handler", async () => {
+    // The viewer never writes to UC. With no POST export Next returns 405, so
+    // there is no unauthenticated mutating proxy even with the flag off.
     const mod = await import("@/app/api/uc/[...path]/route");
-    const req = new NextRequest("http://localhost:3000/api/uc/catalogs", {
-      method: "POST",
-      body: JSON.stringify({ name: "new_catalog" }),
-      headers: { "Content-Type": "application/json" },
-    });
-    const response = await mod.POST(req, {
-      params: Promise.resolve({ path: ["catalogs"] }),
-    });
+    expect(
+      (mod as Record<string, unknown>).POST ??
+        (mod as Record<string, unknown>).PUT ??
+        (mod as Record<string, unknown>).PATCH ??
+        (mod as Record<string, unknown>).DELETE
+    ).toBeUndefined();
+  });
 
-    expect(response.status).toBe(200);
+  it("rejects path traversal (400)", async () => {
+    const mod = await import("@/app/api/uc/[...path]/route");
+    const req = new NextRequest("http://localhost:3000/api/uc/a/x");
+    const response = await mod.GET(req, {
+      params: Promise.resolve({ path: ["a", "..", "..", "x"] }),
+    });
+    expect(response.status).toBe(400);
   });
 });

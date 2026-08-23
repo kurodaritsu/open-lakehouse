@@ -3,12 +3,15 @@
 
 FROM node:22-alpine AS deps
 WORKDIR /app
-COPY package.json ./
+# Copy the lockfile too and use `npm ci` for a reproducible install pinned to
+# package-lock.json (resolves to the public registry; a proxy passed via
+# NPM_REGISTRY is remapped onto those npmjs URLs at fetch time).
+COPY package.json package-lock.json ./
 ARG NPM_REGISTRY=
 ARG NPM_STRICT_SSL=true
 RUN npm config set strict-ssl ${NPM_STRICT_SSL} && \
     if [ -n "${NPM_REGISTRY}" ]; then npm config set registry "${NPM_REGISTRY}"; fi && \
-    npm install
+    npm ci
 
 FROM node:22-alpine AS builder
 WORKDIR /app

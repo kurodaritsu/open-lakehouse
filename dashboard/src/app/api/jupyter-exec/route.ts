@@ -4,6 +4,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { requireEnv } from "@/lib/env";
 import { codeExecutionEnabled, codeExecutionDisabledResponse } from "@/lib/features";
+import { cappedTimeout } from "@/lib/exec";
 
 /**
  * SECURITY NOTE: This endpoint allows arbitrary Python code execution on the
@@ -46,9 +47,11 @@ function executeViaWebSocket(
     const sessionId = crypto.randomUUID();
     let execCount: number | undefined;
 
-    const timer = timeoutMs > 0
-      ? setTimeout(() => { ws.close(); reject(new Error("Execution timed out")); }, timeoutMs)
-      : null;
+    // Always a finite timer — the cap is enforced here regardless of the caller.
+    const timer = setTimeout(() => {
+      ws.close();
+      reject(new Error("Execution timed out"));
+    }, cappedTimeout(timeoutMs));
 
     ws.addEventListener("open", () => {
       ws.send(
@@ -183,9 +186,9 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Default to a finite server-side cap so a runaway cell can't hold the
-    // WebSocket + promise open forever (the client sends no timeout).
-    const result = await executeViaWebSocket(kernelId, code, timeoutMs ?? 120_000);
+    // The finite cap is enforced inside executeViaWebSocket (cappedTimeout), so a
+    // missing or 0/negative client timeout still hits the 120s ceiling.
+    const result = await executeViaWebSocket(kernelId, code, timeoutMs ?? 0);
     return NextResponse.json(result);
   } catch (e) {
     const message = e instanceof Error ? e.message : "Execution failed";

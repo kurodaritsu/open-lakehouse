@@ -1,37 +1,30 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Containerized Lakehouse Platform Contributors
 
+import DOMPurify from "isomorphic-dompurify";
+
 /**
- * Simple HTML sanitizer that strips dangerous tags and attributes.
- * For defense-in-depth against XSS in notebook output rendering.
+ * HTML sanitizer for notebook output rendered via dangerouslySetInnerHTML.
+ *
+ * Uses DOMPurify (a DOM-based sanitizer) rather than regex, so it also closes
+ * the classes regex can't: HTML-entity-encoded schemes (e.g. &#106;avascript:),
+ * leading-whitespace/control-char URLs, and unclosed/malformed tags. DOMPurify
+ * removes scripts, event-handler attributes, javascript: URLs, and scriptable
+ * data: URIs by default, while keeping data:image/* on <img> for notebook image
+ * output. We additionally forbid embedding/interactive tags.
  */
 export function sanitizeHtml(html: string): string {
-  // Remove script tags and their content
-  let clean = html.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '');
-
-  // Remove event handler attributes (onclick, onerror, onload, etc.)
-  clean = clean.replace(/\s+on\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
-
-  // Remove javascript: URLs (double-, single-, and unquoted)
-  clean = clean.replace(
-    /(?:href|src)\s*=\s*(?:"javascript:[^"]*"|'javascript:[^']*'|javascript:[^\s>]+)/gi,
-    ''
-  );
-
-  // Remove non-image data: URLs in src attributes (double-, single-, and
-  // unquoted) — data:image/* is kept for notebook image output.
-  clean = clean.replace(
-    /src\s*=\s*(?:"data:(?!image\/)[^"]*"|'data:(?!image\/)[^']*'|data:(?!image\/)[^\s>]+)/gi,
-    ''
-  );
-
-  // Remove iframe, embed, object tags
-  clean = clean.replace(/<(iframe|embed|object)\b[^>]*>[\s\S]*?<\/\1>/gi, '');
-  clean = clean.replace(/<(iframe|embed|object)\b[^>]*\/?>/gi, '');
-
-  // Remove form and input elements
-  clean = clean.replace(/<(form|input|textarea|select|button)\b[^>]*>[\s\S]*?<\/\1>/gi, '');
-  clean = clean.replace(/<(input|br)\b[^>]*\/?>/gi, '');
-
-  return clean;
+  return DOMPurify.sanitize(html, {
+    FORBID_TAGS: [
+      "script",
+      "iframe",
+      "embed",
+      "object",
+      "form",
+      "input",
+      "textarea",
+      "select",
+      "button",
+    ],
+  });
 }

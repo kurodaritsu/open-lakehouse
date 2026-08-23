@@ -29,16 +29,16 @@ describe("sanitizeHtml", () => {
     expect(sanitizeHtml(input)).toContain("data:image/png");
   });
 
-  it("strips data: non-image URLs", () => {
-    const input = '<img src="data:text/html,<script>alert(1)</script>">';
-    expect(sanitizeHtml(input)).not.toContain("data:text/html");
-  });
-
-  it("strips single-quoted and unquoted data: non-image URLs", () => {
-    expect(sanitizeHtml("<img src='data:text/html;base64,abc'>")).not.toContain(
+  it("strips data:text/html in a navigational (href) context, any quoting", () => {
+    // An <img src=data:...> is non-scriptable in browsers (DOMPurify keeps it);
+    // the real vector is a navigable href, which must be neutralized.
+    expect(
+      sanitizeHtml('<a href="data:text/html,<script>alert(1)</script>">x</a>')
+    ).not.toContain("data:text/html");
+    expect(sanitizeHtml("<a href='data:text/html;base64,abc'>x</a>")).not.toContain(
       "data:text/html"
     );
-    expect(sanitizeHtml("<img src=data:text/html,x>")).not.toContain("data:text/html");
+    expect(sanitizeHtml("<a href=data:text/html,x>y</a>")).not.toContain("data:text/html");
   });
 
   it("strips single-quoted and unquoted javascript: URLs", () => {
@@ -51,5 +51,23 @@ describe("sanitizeHtml", () => {
   it("strips iframe tags", () => {
     const input = '<iframe src="http://evil.com"></iframe>';
     expect(sanitizeHtml(input)).not.toContain("iframe");
+  });
+
+  // Classes a regex sanitizer misses but a DOM-based one closes:
+  it("strips unclosed / malformed script tags", () => {
+    expect(sanitizeHtml("<p>ok</p><script>alert(1)")).not.toContain("alert(1)");
+    expect(sanitizeHtml("<p>ok</p><script>alert(1)")).toContain("<p>ok</p>");
+  });
+
+  it("strips leading-whitespace javascript: URLs", () => {
+    expect(sanitizeHtml('<a href=" javascript:alert(1)">x</a>')).not.toContain(
+      "javascript:"
+    );
+  });
+
+  it("strips HTML-entity-encoded javascript: URLs", () => {
+    const out = sanitizeHtml('<a href="&#106;avascript:alert(1)">x</a>').toLowerCase();
+    expect(out).not.toContain("javascript:");
+    expect(out).not.toContain("avascript");
   });
 });

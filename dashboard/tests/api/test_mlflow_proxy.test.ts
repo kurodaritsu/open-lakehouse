@@ -86,6 +86,24 @@ describe("MLflow Proxy (/api/mlflow/[...path])", () => {
     );
   });
 
+  it("refuses non-search POSTs (experiments/create) with 403", async () => {
+    const mod = await import("@/app/api/mlflow/[...path]/route");
+    const req = new NextRequest(
+      "http://localhost:3000/api/mlflow/2.0/mlflow/experiments/create",
+      {
+        method: "POST",
+        body: JSON.stringify({ name: "evil" }),
+        headers: { "Content-Type": "application/json" },
+      }
+    );
+    const response = await mod.POST(req, {
+      params: Promise.resolve({ path: ["2.0", "mlflow", "experiments", "create"] }),
+    });
+    expect(response.status).toBe(403);
+    // And it must not have proxied the write upstream.
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
   it("sets Host header for MLflow compatibility", async () => {
     vi.mocked(global.fetch).mockResolvedValueOnce(
       new Response("OK", {

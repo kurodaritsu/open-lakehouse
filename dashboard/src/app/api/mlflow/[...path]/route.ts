@@ -7,6 +7,11 @@ import { rejectTraversal } from "@/lib/proxy";
 const MLFLOW_URL = () =>
   process.env.MLFLOW_URL || "http://mlflow-server:5000";
 
+// MLflow exposes its read queries as POST (…/experiments/search, …/runs/search,
+// …/registered-models/search, etc.). Allow POST ONLY for those search endpoints
+// so the viewer stays read-only — create/log/delete/update POSTs are refused.
+const MLFLOW_POST_ALLOWED = /\/search$/;
+
 async function proxy(req: NextRequest, path: string) {
   const baseUrl = MLFLOW_URL();
   const query = req.nextUrl.search;
@@ -55,5 +60,12 @@ export async function POST(
   const { path } = await params;
   const bad = rejectTraversal(path);
   if (bad) return bad;
-  return proxy(req, path.join("/"));
+  const joined = path.join("/");
+  if (!MLFLOW_POST_ALLOWED.test(joined)) {
+    return NextResponse.json(
+      { error: "Only MLflow search endpoints are permitted via POST" },
+      { status: 403 }
+    );
+  }
+  return proxy(req, joined);
 }
