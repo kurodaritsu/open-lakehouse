@@ -27,6 +27,11 @@ SPARK_DIST_URL=https://proxy.example.com/apache/spark-4.1.0-bin-hadoop3.tgz \
 `PIP_TRUSTED_HOST` is optional. Leave it unset when the proxy presents a
 certificate trusted by the build image.
 
+A mirrored `SPARK_DIST_URL` must serve the same tarball as the Apache archive:
+the build extracts it and expects a top-level `spark-4.1.0-bin-hadoop3/`
+directory. Re-hosting the identical file under a different name is fine; a
+repackaged archive with a different internal layout is not.
+
 Jupyter accepts the same Python package arguments:
 
 ```bash
@@ -34,6 +39,22 @@ PIP_INDEX_URL=https://proxy.example.com/pypi/simple \
 PIP_TRUSTED_HOST=proxy.example.com \
 ./lakehouse start notebooks
 ```
+
+`./lakehouse start notebooks` builds the Jupyter image through the proxy only
+when it does not yet exist. If `lakehouse-jupyter:spark-4.1.0` was already built
+(for example against public PyPI), the command reuses that image and the proxy
+arguments have no effect. To re-point an existing image at a proxy, rebuild it
+explicitly first, then start:
+
+```bash
+PIP_INDEX_URL=https://proxy.example.com/pypi/simple \
+PIP_TRUSTED_HOST=proxy.example.com \
+docker compose -f docker-compose-notebooks.yml build
+./lakehouse start notebooks
+```
+
+`./lakehouse start airflow` rebuilds on every start (`up --build`), so its proxy
+arguments always take effect without this step.
 
 The hosted Jupyter image is not part of the local Compose stack. Pass its
 arguments directly:
