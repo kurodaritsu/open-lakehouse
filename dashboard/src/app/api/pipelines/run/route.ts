@@ -56,13 +56,12 @@ function cleanLine(line: string): string | null {
 // Dynamic configs (S3A hadoop settings) belong in the pipeline spec's configuration section.
 // Putting spark.hadoop.* here causes a hang in the Spark Connect launcher.
 //
-// IMPORTANT: these package versions MUST match the SDP_CONF block in the
-// repo-root Makefile (and delta-spark in docker/jupyter). Delta 4.3.0 pulls
-// unitycatalog-client 0.5.0; an older pin here silently resolved different
-// Delta/UC artifacts than `make pipelines-run`, so the same spec behaved
-// differently from the dashboard vs the CLI. Keep them in lockstep.
+// IMPORTANT: keep these package versions on the stack-wide pins (CLAUDE.md /
+// config/spark/spark-defaults.conf). Delta MUST be 4.3.1 — 4.3.0 NPEs through
+// the UC connector (I-02) and resolves unitycatalog-client 0.5.0 instead of the
+// required 0.5.1, so a dashboard-launched pipeline would diverge from the CLI.
 const SDP_CONF_LINES = [
-  "spark.jars.packages io.delta:delta-spark_4.1_2.13:4.3.0,org.apache.hadoop:hadoop-aws:3.4.1",
+  "spark.jars.packages io.delta:delta-spark_4.1_2.13:4.3.1,org.apache.hadoop:hadoop-aws:3.4.1",
   "spark.sql.extensions io.delta.sql.DeltaSparkSessionExtension",
   "spark.sql.catalog.spark_catalog org.apache.spark.sql.delta.catalog.DeltaCatalog",
   "spark.sql.sources.default delta",
@@ -94,7 +93,18 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}));
     const specFile = body.specPath || "spark-pipeline.yml";
-    spec = specFile.startsWith("/") ? specFile : `${PIPELINES_DIR}/${specFile}`;
+    // Only a plain relative .yml/.yaml path inside PIPELINES_DIR: no traversal,
+    // no absolute paths, no shell metacharacters — this value is interpolated
+    // into a shell command below. Mirrors the /api/pipelines POST guard (T-3.7).
+    if (
+      specFile.startsWith("/") ||
+      specFile.includes("..") ||
+      !/^[A-Za-z0-9._/-]+\.ya?ml$/.test(specFile)
+    ) {
+      pipelineLock = false;
+      return Response.json({ error: "Invalid spec path" }, { status: 400 });
+    }
+    spec = `${PIPELINES_DIR}/${specFile}`;
     mode = body.dryRun ? "dry-run" : "run";
     fullRefresh = body.fullRefresh === true;
   } catch {}
@@ -203,7 +213,7 @@ export async function POST(req: NextRequest) {
               `printf '${sdpConf}\\n' > /tmp/sdp-conf/spark-defaults.conf`,
               `printf '${log4jLines}\\n' > /tmp/sdp-conf/log4j2.properties`,
               `echo "${STEP_MARKER}:deps"`,
-              `PYTHONUNBUFFERED=1 SPARK_CONF_DIR=/tmp/sdp-conf spark-pipelines ${mode} --spec ${specFileName}${refreshFlag} 2>&1`,
+              `PYTHONUNBUFFERED=1 SPARK_CONF_DIR=/tmp/sdp-conf spark-pipelines ${mode} --spec '${specFileName}'${refreshFlag} 2>&1`,
               `RC=$?`,
             );
 
@@ -367,6 +377,6 @@ async function saveQuietly(entry: RunHistoryEntry) {
   try {
     await appendRun(entry);
   } catch (err) {
-    console.error("Failed to save run history to MinIO:", err);
+    console.error("Failed to save run history to the object store:", err);
   }
 }

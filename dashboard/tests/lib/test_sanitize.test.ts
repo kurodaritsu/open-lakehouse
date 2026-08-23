@@ -34,6 +34,20 @@ describe("sanitizeHtml", () => {
     expect(sanitizeHtml(input)).not.toContain("data:text/html");
   });
 
+  it("strips single-quoted and unquoted data: non-image URLs", () => {
+    expect(sanitizeHtml("<img src='data:text/html;base64,abc'>")).not.toContain(
+      "data:text/html"
+    );
+    expect(sanitizeHtml("<img src=data:text/html,x>")).not.toContain("data:text/html");
+  });
+
+  it("strips single-quoted and unquoted javascript: URLs", () => {
+    expect(sanitizeHtml("<a href='javascript:alert(1)'>x</a>")).not.toContain(
+      "javascript:"
+    );
+    expect(sanitizeHtml("<img src=javascript:alert(1)>")).not.toContain("javascript:");
+  });
+
   it("strips iframe tags", () => {
     const input = '<iframe src="http://evil.com"></iframe>';
     expect(sanitizeHtml(input)).not.toContain("iframe");

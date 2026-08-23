@@ -2,6 +2,7 @@
 // Copyright 2026 Containerized Lakehouse Platform Contributors
 
 import { NextRequest, NextResponse } from "next/server";
+import { rejectTraversal } from "@/lib/proxy";
 
 const MLFLOW_URL = () =>
   process.env.MLFLOW_URL || "http://mlflow-server:5000";
@@ -42,6 +43,8 @@ export async function GET(
   { params }: { params: Promise<{ path: string[] }> }
 ) {
   const { path } = await params;
+  const bad = rejectTraversal(path);
+  if (bad) return bad;
   return proxy(req, path.join("/"));
 }
 
@@ -50,5 +53,7 @@ export async function POST(
   { params }: { params: Promise<{ path: string[] }> }
 ) {
   const { path } = await params;
+  const bad = rejectTraversal(path);
+  if (bad) return bad;
   return proxy(req, path.join("/"));
 }

@@ -2,6 +2,7 @@
 // Copyright 2026 Containerized Lakehouse Platform Contributors
 
 import { NextRequest, NextResponse } from "next/server";
+import { rejectTraversal } from "@/lib/proxy";
 
 // Read-only proxy to the S3-compatible object store (SeaweedFS). Renamed from
 // /api/minio (CP) to /api/storage since the backing store is no longer MinIO.
@@ -31,5 +32,7 @@ export async function GET(
   { params }: { params: Promise<{ path: string[] }> }
 ) {
   const { path } = await params;
+  const bad = rejectTraversal(path);
+  if (bad) return bad;
   return proxy(req, path.join("/"));
 }

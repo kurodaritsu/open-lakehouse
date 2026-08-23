@@ -12,12 +12,18 @@ export function sanitizeHtml(html: string): string {
   // Remove event handler attributes (onclick, onerror, onload, etc.)
   clean = clean.replace(/\s+on\w+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '');
 
-  // Remove javascript: URLs
-  clean = clean.replace(/href\s*=\s*(?:"javascript:[^"]*"|'javascript:[^']*')/gi, '');
-  clean = clean.replace(/src\s*=\s*(?:"javascript:[^"]*"|'javascript:[^']*')/gi, '');
+  // Remove javascript: URLs (double-, single-, and unquoted)
+  clean = clean.replace(
+    /(?:href|src)\s*=\s*(?:"javascript:[^"]*"|'javascript:[^']*'|javascript:[^\s>]+)/gi,
+    ''
+  );
 
-  // Remove data: URLs in src attributes (except data:image which is used for notebook output)
-  clean = clean.replace(/src\s*=\s*"data:(?!image\/)[^"]*"/gi, '');
+  // Remove non-image data: URLs in src attributes (double-, single-, and
+  // unquoted) — data:image/* is kept for notebook image output.
+  clean = clean.replace(
+    /src\s*=\s*(?:"data:(?!image\/)[^"]*"|'data:(?!image\/)[^']*'|data:(?!image\/)[^\s>]+)/gi,
+    ''
+  );
 
   // Remove iframe, embed, object tags
   clean = clean.replace(/<(iframe|embed|object)\b[^>]*>[\s\S]*?<\/\1>/gi, '');

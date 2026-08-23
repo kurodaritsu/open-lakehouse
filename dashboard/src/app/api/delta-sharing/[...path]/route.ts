@@ -18,7 +18,7 @@ async function proxy(req: NextRequest, path: string) {
     );
   }
 
-  const url = `${DS_URL()}/delta-sharing/${path}`;
+  const url = `${DS_URL()}/delta-sharing/${path}${req.nextUrl.search}`;
   try {
     const res = await fetch(url, {
       method: req.method,
@@ -27,8 +27,9 @@ async function proxy(req: NextRequest, path: string) {
         "Content-Type": "application/json",
       },
       signal: AbortSignal.timeout(5000),
-      // @ts-expect-error Node.js fetch rejectUnauthorized for self-signed certs
-      rejectUnauthorized: false,
+      // Self-signed dev cert: TLS verification is disabled process-wide via
+      // NODE_TLS_REJECT_UNAUTHORIZED=0 (docker-compose-dashboard.yml). Node's
+      // fetch ignores a per-request rejectUnauthorized option, so don't set one.
     });
     const data = await res.text();
     return new NextResponse(data, {

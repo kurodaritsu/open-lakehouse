@@ -63,11 +63,12 @@ export async function getRunHistory(): Promise<RunHistoryEntry[]> {
     );
     const body = await res.Body?.transformToString();
     if (!body) return [];
-    return JSON.parse(body) as RunHistoryEntry[];
+    const parsed = JSON.parse(body);
+    return Array.isArray(parsed) ? (parsed as RunHistoryEntry[]) : [];
   } catch (err: unknown) {
     const code = (err as { name?: string }).name;
     if (code === "NoSuchKey" || code === "NoSuchBucket") return [];
-    console.error("Failed to read run history from MinIO:", err);
+    console.error("Failed to read run history from the object store:", err);
     return [];
   }
 }

@@ -151,8 +151,15 @@ function executeViaWebSocket(
 
     ws.addEventListener("close", (event) => {
       if (timer) clearTimeout(timer);
-      if (!event.wasClean && outputs.length === 0) {
+      // If the socket closes without an execute_reply (e.g. kernel restart
+      // mid-exec), still settle the promise so the awaiting handler can't hang.
+      // resolve/reject after a prior settle is a no-op.
+      if (outputs.length > 0) {
+        resolve({ status: "ok", outputs, execution_count: execCount });
+      } else if (!event.wasClean) {
         reject(new Error("WebSocket closed unexpectedly"));
+      } else {
+        reject(new Error("Kernel closed the connection before completing"));
       }
     });
   });
@@ -176,7 +183,9 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const result = await executeViaWebSocket(kernelId, code, timeoutMs ?? 0);
+    // Default to a finite server-side cap so a runaway cell can't hold the
+    // WebSocket + promise open forever (the client sends no timeout).
+    const result = await executeViaWebSocket(kernelId, code, timeoutMs ?? 120_000);
     return NextResponse.json(result);
   } catch (e) {
     const message = e instanceof Error ? e.message : "Execution failed";

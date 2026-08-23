@@ -2,6 +2,7 @@
 // Copyright 2026 Containerized Lakehouse Platform Contributors
 
 import { NextRequest, NextResponse } from "next/server";
+import { rejectTraversal } from "@/lib/proxy";
 
 const UC_URL = () =>
   process.env.UNITY_CATALOG_URL || "http://unity-catalog:8080";
@@ -37,6 +38,8 @@ export async function GET(
   { params }: { params: Promise<{ path: string[] }> }
 ) {
   const { path } = await params;
+  const bad = rejectTraversal(path);
+  if (bad) return bad;
   return proxy(req, path.join("/"));
 }
 
@@ -45,5 +48,7 @@ export async function POST(
   { params }: { params: Promise<{ path: string[] }> }
 ) {
   const { path } = await params;
+  const bad = rejectTraversal(path);
+  if (bad) return bad;
   return proxy(req, path.join("/"));
 }

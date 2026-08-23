@@ -19,9 +19,8 @@ export async function GET() {
     const res = await fetch(`${dsUrl}/delta-sharing/shares`, {
       headers: { Authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(3000),
-      // Delta Sharing uses self-signed certs in dev
-      // @ts-expect-error Node.js fetch option
-      rejectUnauthorized: false,
+      // Self-signed dev cert handled process-wide via NODE_TLS_REJECT_UNAUTHORIZED=0
+      // (Node's fetch ignores a per-request rejectUnauthorized option).
     });
     return NextResponse.json({ status: res.ok ? "healthy" : "unhealthy" });
   } catch {
