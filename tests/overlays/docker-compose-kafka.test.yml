@@ -1,0 +1,22 @@
+# Test overlay for docker-compose-kafka.yml — see tests/overlays/README.md.
+services:
+  zookeeper:
+    container_name: zookeeper-${LAKEHOUSE_RESOURCE_SUFFIX}
+    network_mode: !reset null
+    networks:
+      - default
+
+  kafka:
+    container_name: kafka-${LAKEHOUSE_RESOURCE_SUFFIX}
+    network_mode: !reset null
+    networks:
+      - default
+    environment:
+      KAFKA_BROKER_ID: 1
+      # Reach the run-scoped Zookeeper and advertise the run-scoped broker name
+      # so in-network clients resolve it on the shared bridge network.
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper-${LAKEHOUSE_RESOURCE_SUFFIX}:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka-${LAKEHOUSE_RESOURCE_SUFFIX}:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1

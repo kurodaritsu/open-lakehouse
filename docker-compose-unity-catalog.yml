@@ -25,8 +25,14 @@
 
 services:
   unity-catalog:
-    # Using newfrontdocker/unitycatalog (community build) — adds Iceberg
-    # write support that upstream unitycatalog/unitycatalog:v0.4.0 lacks.
+    # newfrontdocker/unitycatalog:v0.4.1 is an OFFICIAL STAGING image (Docker Hub:
+    # "used to test containers before publishing in unitycatalog/unitycatalog"),
+    # published by a UC committer — NOT a community fork. We use it only because
+    # official Docker Hub never shipped a v0.4.1 container (its tags jump v0.4.0 ->
+    # v0.5.0). It adds NO Iceberg write support — neither does official 0.5.0; UC OSS
+    # 0.4.x rejects data_source_format=ICEBERG outright, so this catalog is Delta-only
+    # for writes and Iceberg-read-only (see CLAUDE.md). Moving to a mounted uc-data
+    # volume / a UC upgrade is PR #1 — do not change the image here.
     image: newfrontdocker/unitycatalog:v0.4.1
     container_name: unity-catalog
     ports:
@@ -41,7 +47,9 @@ services:
       #- uc-data:/home/unitycatalog/etc/db
       - uc-logs:/home/unitycatalog/etc/logs
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/api/2.1/unity-catalog/catalogs"]
+      # The image ships busybox wget, NOT curl — a curl-based check can never pass and
+      # leaves UC perpetually "unhealthy" (also hanging any depends_on: service_healthy).
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost:8080/api/2.1/unity-catalog/catalogs"]
       interval: 30s
       timeout: 10s
       retries: 3

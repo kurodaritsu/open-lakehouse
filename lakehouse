@@ -5,12 +5,28 @@ set -e
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$PROJECT_ROOT"
 
-# Load environment variables from .env if it exists
-if [ -f "$PROJECT_ROOT/.env" ]; then
+# Load environment variables. When an explicit LAKEHOUSE_ENV_FILE is set (test
+# overlay / fixtures, plan 1.16.1) it REPLACES .env, so production .env values do
+# not leak into an overlay-scoped run; otherwise the default .env is used.
+if [ -n "${LAKEHOUSE_ENV_FILE:-}" ]; then
+    if [ -f "$LAKEHOUSE_ENV_FILE" ]; then
+        set -a
+        # shellcheck disable=SC1090  # path is user-provided by design (test overlay)
+        source "$LAKEHOUSE_ENV_FILE"
+        set +a
+    fi
+elif [ -f "$PROJECT_ROOT/.env" ]; then
     set -a
     source "$PROJECT_ROOT/.env"
     set +a
 fi
+
+# Test-only overlay resolution + destructive-target validation. Sourced always;
+# a complete no-op unless the LAKEHOUSE_* overlay variables are set (plan 1.16.1).
+# Keeps compose files, container names, and published ports resolvable from one place.
+OVERLAY_ACTIVE=false
+# shellcheck source=scripts/lib/overlay.sh
+source "$PROJECT_ROOT/scripts/lib/overlay.sh"
 
 # Colors
 RED='\033[0;31m'
@@ -24,7 +40,7 @@ NC='\033[0m' # No Color
 export DF_TOOL="df"
 check_gnutools_on_macos() {
 	DF_TOOL="gdf"
-	if [ ! $(command -v $DF_TOOL) ]
+	if ! command -v "$DF_TOOL" >/dev/null 2>&1
 	then
         echo -e "${RED}Missing GNU tools on MacOS:${NC}"
         echo -e "  ${RED}✗${NC} $DF_TOOL"
@@ -40,7 +56,9 @@ check_cmd() {
 # Browse Iceberg data
 browse_tables() {
     local table="${1:-iceberg.bronze.orders}"
-    docker exec -it spark-master-41 sh -c "/opt/spark/bin/spark-sql -e \"select * from ${table} limit 10;\""
+    local master
+    master=$(resolve_container_name "$(get_spark_master_container)")
+    docker exec -it "$master" sh -c "/opt/spark/bin/spark-sql -e \"select * from ${table} limit 10;\""
 }
 
 # Setup PostgreSQL database (create if not exists)
@@ -178,7 +196,7 @@ preflight_checks() {
             if nc -z localhost "$port" 2>/dev/null; then
                 # Port in use - check if it's our expected service
                 case $port in
-                    $spark_port|$spark_ui_port)
+                    "$spark_port"|"$spark_ui_port")
                         if docker ps --format '{{.Names}}' | grep -q "spark-master"; then
                             echo -e "   ${GREEN}✓${NC} Port $port ($name) - existing Spark service"
                         else
@@ -186,7 +204,7 @@ preflight_checks() {
                         fi
                         ;;
                     9092)
-                        if docker ps --format '{{.Names}}' | grep -q "^kafka$"; then
+                        if docker ps --format '{{.Names}}' | grep -q "^$(resolve_container_name kafka)$"; then
                             echo -e "   ${GREEN}✓${NC} Port $port ($name) - existing Kafka service"
                         else
                             echo -e "   ${YELLOW}!${NC} Port $port ($name) already in use"
@@ -291,15 +309,20 @@ wait_for_service() {
 
 # Wait for all services to be healthy
 wait_for_services() {
+    # Container names resolve through the overlay layer (docker ps sees the
+    # suffixed names); localhost health ports stay fixed here — see cmd_status_json.
     local spark_port=$(get_spark_port)
-    local master_container=$(get_spark_master_container)
+    local master_container=$(resolve_container_name "$(get_spark_master_container)")
+    local kafka_ct zk_ct
+    kafka_ct=$(resolve_container_name kafka)
+    zk_ct=$(resolve_container_name zookeeper)
     echo ""
 
     # Kafka/Zookeeper (if started)
-    if docker ps --format '{{.Names}}' | grep -q '^zookeeper$'; then
+    if docker ps --format '{{.Names}}' | grep -q "^${zk_ct}$"; then
         wait_for_service "Zookeeper" "nc -z localhost 2181" 30
     fi
-    if docker ps --format '{{.Names}}' | grep -q '^kafka$'; then
+    if docker ps --format '{{.Names}}' | grep -q "^${kafka_ct}$"; then
         wait_for_service "Kafka" "nc -z localhost 9092" 30
     fi
 
@@ -310,7 +333,8 @@ wait_for_services() {
     fi
 }
 
-# Fixed Spark 4.1 constants (this repo is Spark-4.1-only)
+# Fixed Spark 4.1 constants (this repo is Spark-4.1-only).
+# shellcheck disable=SC2034  # documentary constant; get_spark_* below are the interface
 SPARK_VERSION="4.1"
 get_spark_compose()           { echo "docker-compose-spark41.yml"; }
 get_spark_master_container()  { echo "spark-master-41"; }
@@ -409,18 +433,25 @@ is_container_running() {
 
 # Status command - JSON output
 cmd_status_json() {
+    # Container names resolve through the overlay layer — identical to the base
+    # literals on the default path except the allow-listed mlflow->mlflow-server fix
+    # (T-1.5.11), and run-scoped when a test overlay is active (docker ps sees the
+    # suffixed names). Host-service and localhost health PORTS stay at their fixed
+    # values here: PostgreSQL/SeaweedFS are host-installed (always 5432/8333), and
+    # wiring resolve_port into localhost probes only pays off once the overlay
+    # publishes host-facing ports — deferred to the E-07 work (Checkpoint 7).
     local pg_ok=$(is_service_healthy 5432 && echo "true" || echo "false")
     local s3_ok=$(is_service_healthy 8333 && echo "true" || echo "false")
-    local spark_master=$(is_container_running "spark-master-41" && echo "true" || echo "false")
-    local spark_worker=$(is_container_running "spark-worker-41" && echo "true" || echo "false")
-    local spark_connect=$(is_container_running "spark-connect-41" && echo "true" || echo "false")
+    local spark_master=$(is_container_running "$(resolve_container_name spark-master-41)" && echo "true" || echo "false")
+    local spark_worker=$(is_container_running "$(resolve_container_name spark-worker-41)" && echo "true" || echo "false")
+    local spark_connect=$(is_container_running "$(resolve_container_name spark-connect-41)" && echo "true" || echo "false")
     local connect_grpc=$(is_service_healthy "$(get_spark_connect_port)" && echo "true" || echo "false")
-    local kafka_ok=$(is_container_running "kafka" && echo "true" || echo "false")
-    local zk_ok=$(is_container_running "zookeeper" && echo "true" || echo "false")
-    local uc_ok=$(is_container_running "unity-catalog" && echo "true" || echo "false")
-    local airflow_web=$(is_container_running "airflow-webserver" && echo "true" || echo "false")
-    local airflow_sched=$(is_container_running "airflow-scheduler" && echo "true" || echo "false")
-    local mlflow_ok=$(is_container_running "mlflow" && echo "true" || echo "false")
+    local kafka_ok=$(is_container_running "$(resolve_container_name kafka)" && echo "true" || echo "false")
+    local zk_ok=$(is_container_running "$(resolve_container_name zookeeper)" && echo "true" || echo "false")
+    local uc_ok=$(is_container_running "$(resolve_container_name unity-catalog)" && echo "true" || echo "false")
+    local airflow_web=$(is_container_running "$(resolve_container_name airflow-webserver)" && echo "true" || echo "false")
+    local airflow_sched=$(is_container_running "$(resolve_container_name airflow-scheduler)" && echo "true" || echo "false")
+    local mlflow_ok=$(is_container_running "$(resolve_container_name mlflow)" && echo "true" || echo "false")
 
     cat <<EOF
 {
@@ -456,30 +487,43 @@ EOF
 cmd_status_human() {
     header "LAKEHOUSE STATUS"
 
+    local uc_ct spark_master_ct spark_worker_ct spark_connect_ct kafka_ct zk_ct
+    local airflow_web_ct airflow_sched_ct airflow_trig_ct mlflow_ct
+    uc_ct=$(resolve_container_name unity-catalog)
+    spark_master_ct=$(resolve_container_name spark-master-41)
+    spark_worker_ct=$(resolve_container_name spark-worker-41)
+    spark_connect_ct=$(resolve_container_name spark-connect-41)
+    kafka_ct=$(resolve_container_name kafka)
+    zk_ct=$(resolve_container_name zookeeper)
+    airflow_web_ct=$(resolve_container_name airflow-webserver)
+    airflow_sched_ct=$(resolve_container_name airflow-scheduler)
+    airflow_trig_ct=$(resolve_container_name airflow-triggerer)
+    mlflow_ct=$(resolve_container_name mlflow)
+
     echo -e "\n${YELLOW}System Services:${NC}"
     check_service postgres 5432 "PostgreSQL"
     check_service seaweedfs 8333 "SeaweedFS"
 
     echo -e "\n${YELLOW}Unity Catalog:${NC}"
-    check_container "unity-catalog" && check_service uc 8081 "Unity Catalog REST API" || true
+    check_container "$uc_ct" && check_service uc 8081 "Unity Catalog REST API" || true
 
     echo -e "\n${YELLOW}Spark 4.1 (Connect-first):${NC}"
-    check_container "spark-master-41" && docker exec spark-master-41 /opt/spark/bin/spark-submit --version 2>&1 | grep "version" | head -1 || true
-    check_container "spark-worker-41" || true
-    check_container "spark-connect-41" && check_service connect "$(get_spark_connect_port)" "Spark Connect gRPC" || true
+    check_container "$spark_master_ct" && docker exec "$spark_master_ct" /opt/spark/bin/spark-submit --version 2>&1 | grep "version" | head -1 || true
+    check_container "$spark_worker_ct" || true
+    check_container "$spark_connect_ct" && check_service connect "$(get_spark_connect_port)" "Spark Connect gRPC" || true
     echo -e "  Spark Connect endpoint: ${BLUE}$(get_spark_remote)${NC}"
 
     echo -e "\n${YELLOW}Kafka Containers:${NC}"
-    check_container "kafka" || true
-    check_container "zookeeper" || true
+    check_container "$kafka_ct" || true
+    check_container "$zk_ct" || true
 
     echo -e "\n${YELLOW}Airflow Containers:${NC}"
-    check_container "airflow-webserver" && check_service airflow 8085 "Airflow UI" || true
-    check_container "airflow-scheduler" || true
-    check_container "airflow-triggerer" || true
+    check_container "$airflow_web_ct" && check_service airflow 8085 "Airflow UI" || true
+    check_container "$airflow_sched_ct" || true
+    check_container "$airflow_trig_ct" || true
 
     echo -e "\n${YELLOW}MLflow:${NC}"
-    check_container "mlflow" && check_service mlflow 5000 "MLflow Tracking" || true
+    check_container "$mlflow_ct" && check_service mlflow 5000 "MLflow Tracking" || true
 
     echo -e "\n${YELLOW}Ports:${NC}"
     echo "  PostgreSQL:       5432"
@@ -537,10 +581,22 @@ check_port_available() {
 check_ports_for_service() {
     local service=$1
     local has_conflicts=0
+
+    # Under an active test overlay the stack runs on a project-scoped bridge
+    # network and publishes NO host ports (plan 1.17.1) — so host-port conflicts
+    # with the production stack cannot occur, and checking the base host ports
+    # here would spuriously block startup (the production service legitimately
+    # holds them). Skip the host-port pre-flight in overlay mode.
+    if [ "${OVERLAY_ACTIVE:-false}" = "true" ]; then
+        echo -e "${YELLOW}Overlay active — skipping host-port pre-flight (bridge network, no published ports).${NC}"
+        return 0
+    fi
+
     local spark_port=$(get_spark_port)
     local spark_ui_port=$(get_spark_ui_port)
-    local master_container=$(get_spark_master_container)
-    local worker_container=$(get_spark_worker_container)
+    local master_container worker_container
+    master_container=$(resolve_container_name "$(get_spark_master_container)")
+    worker_container=$(resolve_container_name "$(get_spark_worker_container)")
 
     echo -e "${YELLOW}Checking port availability...${NC}"
 
@@ -569,14 +625,14 @@ check_ports_for_service() {
 
     case $service in
         kafka|all)
-            if ! check_port_available 9092 "kafka"; then
+            if ! check_port_available 9092 "$(resolve_container_name kafka)"; then
                 echo -e "  ${RED}✗${NC} Port 9092 (Kafka) blocked by another process"
                 has_conflicts=1
             else
                 echo -e "  ${GREEN}✓${NC} Port 9092 (Kafka) available"
             fi
 
-            if ! check_port_available 2181 "zookeeper"; then
+            if ! check_port_available 2181 "$(resolve_container_name zookeeper)"; then
                 echo -e "  ${RED}✗${NC} Port 2181 (Zookeeper) blocked by another process"
                 has_conflicts=1
             else
@@ -587,7 +643,7 @@ check_ports_for_service() {
 
     case $service in
         unity-catalog|uc)
-            if ! check_port_available 8081 "unity-catalog"; then
+            if ! check_port_available 8081 "$(resolve_container_name unity-catalog)"; then
                 echo -e "  ${RED}✗${NC} Port 8081 (Unity Catalog) blocked by another process"
                 has_conflicts=1
             else
@@ -611,7 +667,6 @@ cmd_start() {
     header "STARTING SERVICES"
 
     local service=$1
-    local compose_file=$(get_spark_compose)
     local spark_port=$(get_spark_port)
 
     # Check port availability before starting
@@ -624,7 +679,8 @@ cmd_start() {
     case $service in
         spark|all)
             echo -e "${YELLOW}Starting Spark 4.1 (port $spark_port, Connect on $(get_spark_connect_port))...${NC}"
-            docker compose -f "$compose_file" up -d
+            overlay_set_compose_args spark41 || return 1
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d
             wait_for_service "Spark Connect" "nc -z localhost $(get_spark_connect_port)" 90
             echo -e "${GREEN}Spark Connect endpoint:${NC} $(get_spark_remote)"
             ;;
@@ -633,7 +689,8 @@ cmd_start() {
     case $service in
         kafka|all)
             echo -e "${YELLOW}Starting Kafka...${NC}"
-            docker compose -f docker-compose-kafka.yml up -d
+            overlay_set_compose_args kafka || return 1
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d
             ;;
     esac
 
@@ -645,7 +702,8 @@ cmd_start() {
                 cp config/unity-catalog/server.properties.example config/unity-catalog/server.properties
                 echo -e "${YELLOW}!${NC} Edit config/unity-catalog/server.properties with your S3 credentials"
             fi
-            docker compose -f docker-compose-unity-catalog.yml up -d
+            overlay_set_compose_args unity-catalog || return 1
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d
             wait_for_service "Unity Catalog" "curl -s http://localhost:8081/api/2.1/unity-catalog/catalogs" 60
             ;;
     esac
@@ -654,7 +712,8 @@ cmd_start() {
         airflow)
             echo -e "${YELLOW}Starting Airflow...${NC}"
             mkdir -p logs/airflow
-            docker compose -f docker-compose-airflow.yml up -d --build
+            overlay_set_compose_args airflow || return 1
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d --build
             wait_for_service "Airflow" "curl -s http://localhost:8085/health" 120
             echo -e "${GREEN}Airflow UI available at: http://localhost:8085${NC}"
             echo -e "${YELLOW}Default credentials: admin/admin (change in .env)${NC}"
@@ -664,7 +723,8 @@ cmd_start() {
     case $service in
         mlflow)
             echo -e "${YELLOW}Starting MLflow...${NC}"
-            docker compose -f docker-compose-mlflow.yml up -d
+            overlay_set_compose_args mlflow || return 1
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d
             wait_for_service "MLflow" "curl -s http://localhost:5000/health" 60
             echo -e "${GREEN}MLflow tracking UI at: http://localhost:5000${NC}"
             ;;
@@ -691,40 +751,44 @@ cmd_stop() {
     header "STOPPING SERVICES"
 
     local service=$1
-    local compose_file=$(get_spark_compose)
 
     case $service in
         spark|all)
             echo -e "${YELLOW}Stopping Spark 4.1...${NC}"
-            docker compose -f "$compose_file" down
+            overlay_set_compose_args spark41 || return 1
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down
             ;;
     esac
 
     case $service in
         kafka|all)
             echo -e "${YELLOW}Stopping Kafka...${NC}"
-            docker compose -f docker-compose-kafka.yml down
+            overlay_set_compose_args kafka || return 1
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down
             ;;
     esac
 
     case $service in
         unity-catalog|uc)
             echo -e "${YELLOW}Stopping Unity Catalog...${NC}"
-            docker compose -f docker-compose-unity-catalog.yml down
+            overlay_set_compose_args unity-catalog || return 1
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down
             ;;
     esac
 
     case $service in
         airflow)
             echo -e "${YELLOW}Stopping Airflow...${NC}"
-            docker compose -f docker-compose-airflow.yml down
+            overlay_set_compose_args airflow || return 1
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down
             ;;
     esac
 
     case $service in
         mlflow)
             echo -e "${YELLOW}Stopping MLflow...${NC}"
-            docker compose -f docker-compose-mlflow.yml down
+            overlay_set_compose_args mlflow || return 1
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down
             ;;
     esac
 
@@ -741,8 +805,8 @@ cmd_stop() {
 # Logs command
 cmd_logs() {
     local service=$1
-    local master_container=$(get_spark_master_container)
-    local worker_container=$(get_spark_worker_container)
+    local master_container=$(resolve_container_name "$(get_spark_master_container)")
+    local worker_container=$(resolve_container_name "$(get_spark_worker_container)")
 
     case $service in
         spark-master)
@@ -754,16 +818,16 @@ cmd_logs() {
             docker logs -f "$worker_container"
             ;;
         spark-connect)
-            echo -e "${YELLOW}Logs for spark-connect-41:${NC}"
-            docker logs -f spark-connect-41
+            echo -e "${YELLOW}Logs for $(resolve_container_name spark-connect-41):${NC}"
+            docker logs -f "$(resolve_container_name spark-connect-41)"
             ;;
-        kafka)            docker logs -f kafka ;;
-        zookeeper)        docker logs -f zookeeper ;;
-        unity-catalog|uc) docker logs -f unity-catalog ;;
-        mlflow)           docker logs -f mlflow ;;
-        airflow-webserver|airflow-web)    docker logs -f airflow-webserver ;;
-        airflow-scheduler|airflow-sched)  docker logs -f airflow-scheduler ;;
-        airflow-triggerer)                docker logs -f airflow-triggerer ;;
+        kafka)            docker logs -f "$(resolve_container_name kafka)" ;;
+        zookeeper)        docker logs -f "$(resolve_container_name zookeeper)" ;;
+        unity-catalog|uc) docker logs -f "$(resolve_container_name unity-catalog)" ;;
+        mlflow)           docker logs -f "$(resolve_container_name mlflow)" ;;
+        airflow-webserver|airflow-web)    docker logs -f "$(resolve_container_name airflow-webserver)" ;;
+        airflow-scheduler|airflow-sched)  docker logs -f "$(resolve_container_name airflow-scheduler)" ;;
+        airflow-triggerer)                docker logs -f "$(resolve_container_name airflow-triggerer)" ;;
         *)
             echo "Usage: lakehouse logs [spark-master|spark-worker|spark-connect|kafka|zookeeper|unity-catalog|mlflow|airflow-webserver|airflow-scheduler|airflow-triggerer]"
             exit 1
@@ -775,7 +839,16 @@ cmd_logs() {
 cmd_test() {
     set +e  # Disable exit on error for tests
     header "RUNNING TESTS"
-    local master_container=$(get_spark_master_container)
+    # Resolve container names through the overlay layer (base names on the default
+    # path; run-scoped under an active test overlay) so `test` never probes/execs
+    # the wrong stack (plan 1.17.4).
+    local master_container kafka_ctr uc_ctr aflow_web_ctr aflow_sched_ctr connect_ctr
+    master_container=$(resolve_container_name "$(get_spark_master_container)")
+    kafka_ctr=$(resolve_container_name kafka)
+    uc_ctr=$(resolve_container_name unity-catalog)
+    aflow_web_ctr=$(resolve_container_name airflow-webserver)
+    aflow_sched_ctr=$(resolve_container_name airflow-scheduler)
+    connect_ctr=$(resolve_container_name spark-connect-41)
     local failures=0
 
     echo -e "${YELLOW}1. Testing PostgreSQL connection...${NC}"
@@ -802,12 +875,12 @@ cmd_test() {
     fi
 
     echo -e "\n${YELLOW}3. Testing Kafka...${NC}"
-    if docker ps --format '{{.Names}}' | grep -q '^kafka$'; then
-        if docker exec kafka kafka-topics --list --bootstrap-server localhost:9092 >/dev/null 2>&1; then
+    if docker ps --format '{{.Names}}' | grep -q "^${kafka_ctr}$"; then
+        if docker exec "$kafka_ctr" kafka-topics --list --bootstrap-server localhost:9092 >/dev/null 2>&1; then
             echo -e "   ${GREEN}✓${NC} Kafka broker healthy"
         else
             echo -e "   ${RED}✗${NC} Kafka broker not responding"
-            echo -e "   ${YELLOW}→ Check: docker logs kafka${NC}"
+            echo -e "   ${YELLOW}→ Check: docker logs ${kafka_ctr}${NC}"
             ((failures++))
         fi
     else
@@ -836,12 +909,12 @@ cmd_test() {
         echo -e "   ${GREEN}✓${NC} Spark Connect listening on $(get_spark_remote)"
     else
         echo -e "   ${RED}✗${NC} Spark Connect not reachable on port $(get_spark_connect_port)"
-        echo -e "   ${YELLOW}→ Check: docker logs spark-connect-41${NC}"
+        echo -e "   ${YELLOW}→ Check: docker logs ${connect_ctr}${NC}"
         ((failures++))
     fi
 
     echo -e "\n${YELLOW}5. Testing Unity Catalog (optional)...${NC}"
-    if docker ps --format '{{.Names}}' | grep -q '^unity-catalog$'; then
+    if docker ps --format '{{.Names}}' | grep -q "^${uc_ctr}$"; then
         if curl -s --connect-timeout 5 http://localhost:8081/api/2.1/unity-catalog/catalogs > /dev/null 2>&1; then
             echo -e "   ${GREEN}✓${NC} Unity Catalog REST API healthy"
             # Test Iceberg REST endpoint
@@ -852,7 +925,7 @@ cmd_test() {
             fi
         else
             echo -e "   ${RED}✗${NC} Unity Catalog not responding"
-            echo -e "   ${YELLOW}→ Check: docker logs unity-catalog${NC}"
+            echo -e "   ${YELLOW}→ Check: docker logs ${uc_ctr}${NC}"
             ((failures++))
         fi
     else
@@ -861,10 +934,10 @@ cmd_test() {
     fi
 
     echo -e "\n${YELLOW}6. Testing Airflow (optional)...${NC}"
-    if docker ps --format '{{.Names}}' | grep -q '^airflow-webserver$'; then
+    if docker ps --format '{{.Names}}' | grep -q "^${aflow_web_ctr}$"; then
         if curl -s --connect-timeout 5 http://localhost:8085/health | grep -q '"healthy"'; then
             echo -e "   ${GREEN}✓${NC} Airflow webserver healthy"
-            if docker ps --format '{{.Names}}' | grep -q '^airflow-scheduler$'; then
+            if docker ps --format '{{.Names}}' | grep -q "^${aflow_sched_ctr}$"; then
                 echo -e "   ${GREEN}✓${NC} Airflow scheduler running"
             else
                 echo -e "   ${RED}✗${NC} Airflow scheduler not running"
@@ -872,7 +945,7 @@ cmd_test() {
             fi
         else
             echo -e "   ${RED}✗${NC} Airflow webserver not responding"
-            echo -e "   ${YELLOW}→ Check: docker logs airflow-webserver${NC}"
+            echo -e "   ${YELLOW}→ Check: docker logs ${aflow_web_ctr}${NC}"
             ((failures++))
         fi
     else
@@ -902,7 +975,8 @@ cmd_producer() {
 # Consumer command
 cmd_consumer() {
     header "STARTING SPARK CONSUMER"
-    local master_container=$(get_spark_master_container)
+    local master_container
+    master_container=$(resolve_container_name "$(get_spark_master_container)")
     local kafka_package="org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.0"
 
     echo -e "${YELLOW}Using Spark 4.1 ($master_container)${NC}"
@@ -928,7 +1002,8 @@ cmd_testdata() {
             ;;
         load)
             header "LOADING TO ICEBERG"
-            local master_container=$(get_spark_master_container)
+            local master_container
+            master_container=$(resolve_container_name "$(get_spark_master_container)")
             if [ -f "data/load_to_iceberg.py" ]; then
                 # Copy load script to scripts dir (which is mounted in container)
                 cp data/load_to_iceberg.py scripts/_load_to_iceberg.py
@@ -1276,7 +1351,1458 @@ cmd_setup() {
     fi
 }
 
+# ============================================================================
+# Lifecycle commands: reset / backup / restore / doctor  (PR #0, Phase 1.5)
+# ----------------------------------------------------------------------------
+# These are TOP-LEVEL COMMANDS, not services (plan 1.13.3). Each is registered at
+# four sites — argument parsing (the connect-mode bypass), a cmd_<name>() function,
+# the top-level case dispatch, and cmd_help() — never the 7-site service model, and
+# never in the start/stop/logs service dispatch.
+# ============================================================================
+
+# Detect Unity Catalog's effective state backend from CONFIG, never from volume
+# topology (T-1.5.1, plan 1.14.5). Reads the live server.properties if present,
+# else the image default (embedded H2). Prints "h2" or "postgresql:<db>".
+# Optional $1 overrides the properties path (used by unit tests).
+detect_uc_backend() {
+    local props="${1:-$PROJECT_ROOT/config/unity-catalog/server.properties}"
+    if [ -f "$props" ]; then
+        local url
+        url=$(grep -E '^[[:space:]]*hibernate\.connection\.url=jdbc:postgresql:' "$props" 2>/dev/null | head -1 || true)
+        if [ -n "$url" ]; then
+            local db=""
+            case "$url" in
+                */*) db="${url##*/}" ;;  # standard form jdbc:postgresql://host:port/<db>
+                *)   db="${url##*:}" ;;  # slash-less form jdbc:postgresql:<db>
+            esac
+            db="${db%%\?*}"            # drop any ?jdbcParams suffix
+            db="${db%%[[:space:]]*}"   # drop trailing whitespace/comment
+            # NB: keep '-' and '.' — they are legal in a PostgreSQL database name.
+            if [ -n "$db" ]; then
+                echo "postgresql:${db}"
+                return 0
+            fi
+        fi
+    fi
+    # No live config, or the PostgreSQL block is commented out -> embedded H2.
+    echo "h2"
+    return 0
+}
+
+# Named volumes declared by the ACTIVE BASE compose set only — never *.test.yml
+# overlays or $LAKEHOUSE_OVERLAY_DIR (plan 1.16.6). One name per line.
+reset_discover_volumes() {
+    local f
+    for f in "$PROJECT_ROOT"/docker-compose-*.yml; do
+        case "$f" in
+            *.test.yml) continue ;;
+        esac
+        awk '
+            /^volumes:/ { inv=1; next }
+            /^[^[:space:]#]/ { inv=0 }
+            inv && /^[[:space:]]+[A-Za-z0-9_-]+:[[:space:]]*$/ {
+                name=$1; sub(/:$/,"",name); print name
+            }
+        ' "$f"
+    done | sort -u
+    return 0
+}
+
+# Which reset modes destroy a given named volume (plan 1.14.7). Prints a
+# comma-list of modes, or "never" for the explicit never-destroy list.
+reset_volume_mode() {
+    case "$1" in
+        mlflow-data)           echo "metadata,all" ;;  # tracking state (kept by --keep-mlflow)
+        uc-data)               echo "metadata,all" ;;  # catalog state (if ever mounted)
+        uc-logs)               echo "never" ;;         # diagnostics — never destroyed
+        spark-data|spark-logs) echo "data,all" ;;      # job scratch + event logs
+        *)                     echo "data,all" ;;      # default: data-plane scratch
+    esac
+    return 0
+}
+
+# PostgreSQL databases a mode drops+recreates (plan 1.13.4 as amended by 1.14.1).
+# --data preserves all databases; --metadata/--all reset UC(if PG)+airflow+iceberg
+# (+mlflow unless --keep-mlflow). Never the non-existent "unitycatalog" (plan 1.13.2).
+reset_db_targets() {
+    local mode="$1" keep_mlflow="$2"
+    case "$mode" in
+        metadata|all)
+            echo "airflow"
+            echo "iceberg_catalog"
+            if [ "$keep_mlflow" != "true" ]; then
+                echo "mlflow"
+            fi
+            local uc
+            uc=$(detect_uc_backend)
+            if [ "${uc%%:*}" = "postgresql" ]; then
+                echo "${uc#postgresql:}"
+            fi
+            ;;
+        data) : ;;  # data plane only — databases preserved
+    esac
+    return 0
+}
+
+# Effective (overlay-aware) target NAMES. Under an active overlay these default to
+# run-scoped names, but an explicit S3_BUCKET / MLFLOW_PG_DB in the environment STILL
+# takes precedence (`${S3_BUCKET:-ol-test-…}`), so a production value CAN influence
+# them if LAKEHOUSE_ENV_FILE is unset and the real .env is sourced. Safety therefore
+# does NOT rest on these helpers alone: the semantic gate (plan 1.18.2), now wired
+# into reset, backup, AND restore, re-derives these and ABORTS unless every target is
+# run-scoped. Overlay-inactive, these are the real configured names (unrestricted).
+reset_effective_bucket() {
+    if [ "${OVERLAY_ACTIVE:-false}" = "true" ]; then
+        echo "${S3_BUCKET:-ol-test-${LAKEHOUSE_TEST_RUN_ID}}"
+    else
+        echo "${S3_BUCKET:-lakehouse}"
+    fi
+}
+
+# $1 = logical base DB (airflow | iceberg_catalog | mlflow | <uc-pg-db>)
+reset_effective_db() {
+    local base="$1"
+    if [ "${OVERLAY_ACTIVE:-false}" = "true" ]; then
+        case "$base" in
+            mlflow) echo "${MLFLOW_PG_DB:-ol_test_${LAKEHOUSE_TEST_RUN_ID}_mlflow}" ;;
+            *)      echo "ol_test_${LAKEHOUSE_TEST_RUN_ID}_${base}" ;;
+        esac
+    else
+        case "$base" in
+            mlflow) echo "${MLFLOW_PG_DB:-mlflow}" ;;
+            *)      echo "$base" ;;
+        esac
+    fi
+}
+
+# $1 = short volume name -> the physical docker volume name (project-prefixed).
+reset_effective_volume() {
+    local proj="${COMPOSE_PROJECT_NAME:-}"
+    if [ -z "$proj" ]; then
+        # Match Docker Compose's default project-name normalization of the working
+        # directory: lowercase, and keep only [a-z0-9_-]. Raw `basename` would miss
+        # this, so a repo checked out into e.g. "Open Lakehouse" would target the
+        # wrong volume name and silently leave the real data volume untouched.
+        proj="$(basename "$PROJECT_ROOT" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9_-')"
+    fi
+    echo "${proj}_$1"
+}
+
+# Human-readable total size of an S3 prefix (best-effort; "unknown" if unreachable).
+reset_s3_prefix_size() {
+    local prefix="$1" line
+    line=$(aws_s3 ls "$prefix" --recursive --summarize 2>/dev/null | grep -i 'Total Size:' | tail -1 || true)
+    if [ -n "$line" ]; then
+        echo "${line##*: }"
+    else
+        echo "unknown"
+    fi
+}
+
+# The classified orphan warning a --metadata reset must print (T-1.5.7, D7). It
+# reports the THREE classes a metadata reset actually CREATES (plan 1.16.7) —
+# recoverable Delta, doubtful Iceberg, unrecoverable MLflow artifacts (with a byte
+# size) — NOT the dangling-catalog class (that is pre-existing/manual). With
+# --keep-mlflow the unrecoverable-MLflow class is suppressed: two classes (1.15.6).
+reset_metadata_warning() {
+    local keep_mlflow="$1" bucket
+    bucket=$(reset_effective_bucket)
+    echo "WARNING: --metadata drops catalog/tracking metadata but KEEPS object storage."
+    echo "  Objects left orphaned under s3://${bucket}/warehouse/, by recoverability:"
+    echo "  [recoverable]   Delta table prefixes — re-registerable from the Delta transaction log (tooling arrives in a later phase)."
+    echo "  [doubtful]      Iceberg table prefixes — UC OSS 0.4.x exposes no Iceberg write endpoints, so re-registration may be impossible."
+    if [ "$keep_mlflow" != "true" ]; then
+        local size
+        size=$(reset_s3_prefix_size "s3://${bucket}/mlflow-artifacts/")
+        echo "  [UNRECOVERABLE] MLflow artifacts under s3://${bucket}/mlflow-artifacts/ (${size}) — the Postgres run records that indexed them are being dropped; the bytes become unreachable."
+    fi
+    return 0
+}
+
+# Emit the machine-greppable reset PLAN for a mode. Pure enumeration — issues no
+# docker/psql/rm. Tokens: "PLAN target=<class> name=<n> action=<a> [reason=<r>]".
+reset_emit_plan() {
+    local mode="$1" keep_mlflow="$2"
+    local bucket
+    bucket=$(reset_effective_bucket)
+
+    local db
+    for db in $(reset_db_targets "$mode" "$keep_mlflow"); do
+        echo "PLAN target=database name=$(reset_effective_db "$db") action=drop-recreate"
+    done
+
+    if [ "$mode" = "metadata" ] || [ "$mode" = "all" ]; then
+        local uc
+        uc=$(detect_uc_backend)
+        if [ "$uc" = "h2" ]; then
+            echo "PLAN target=uc-state name=h2-in-container action=reset"
+        fi
+    fi
+
+    if [ "$mode" = "data" ] || [ "$mode" = "all" ]; then
+        echo "PLAN target=s3 name=s3://${bucket}/warehouse/ action=delete"
+        echo "PLAN target=s3 name=s3://${bucket}/mlflow-artifacts/ action=delete"
+        echo "PLAN target=rows name=uc-table-registrations action=clear"
+        echo "PLAN target=rows name=mlflow-run-records action=clear"
+        echo "PLAN target=rows name=iceberg_catalog-rows action=clear"
+        # NOTE: Kafka topic/checkpoint reset is NOT emitted — it is not implemented in
+        # PR #0 (the engine quiesces Kafka but deletes no topics/checkpoints), so
+        # advertising it in the plan would make --dry-run lie (review-handoff #4).
+        # Deferred to a follow-up PR; the §1.13.4 matrix row is a future target.
+    fi
+
+    local v vmode
+    for v in $(reset_discover_volumes); do
+        vmode=$(reset_volume_mode "$v")
+        if [ "$vmode" = "never" ]; then
+            echo "PLAN target=volume name=${v} action=preserve reason=never-destroy"
+            continue
+        fi
+        if [ "$keep_mlflow" = "true" ] && [ "$v" = "mlflow-data" ]; then
+            echo "PLAN target=volume name=${v} action=preserve reason=keep-mlflow"
+            continue
+        fi
+        case ",${vmode}," in
+            *",${mode},"*) echo "PLAN target=volume name=${v} action=remove" ;;
+            *)             echo "PLAN target=volume name=${v} action=preserve reason=other-mode" ;;
+        esac
+    done
+    return 0
+}
+
+# --- destructive engine (Checkpoint 3) --------------------------------------------
+
+# Run psql against the configured PostgreSQL. Prefers a host psql (OL's documented
+# setup); falls back to a dockerized client so reset works with no host pg client
+# (plan 1.17.9 — installing tooling is an impl detail). Host mapping: host psql
+# reaches the host DB at localhost; the dockerized client reaches it via the
+# host-gateway. All args forwarded to psql.
+pg_psql() {
+    local host="${POSTGRES_HOST:-localhost}"
+    if command -v psql >/dev/null 2>&1; then
+        host="${host/host.docker.internal/localhost}"
+        PGPASSWORD="${POSTGRES_PASSWORD:-}" psql -h "$host" -p "${POSTGRES_PORT:-5432}" \
+            -U "${POSTGRES_USER:-postgres}" "$@"
+    else
+        # dockerized client: any host-loopback form must become the host-gateway
+        host="${host//127.0.0.1/host.docker.internal}"
+        host="${host//localhost/host.docker.internal}"
+        docker run --rm -i --add-host=host.docker.internal:host-gateway \
+            -e PGPASSWORD="${POSTGRES_PASSWORD:-}" \
+            "${LAKEHOUSE_PG_CLIENT_IMAGE:-postgres:15-alpine}" \
+            psql -h "$host" -p "${POSTGRES_PORT:-5432}" -U "${POSTGRES_USER:-postgres}" "$@"
+    fi
+}
+
+# Run `aws s3 ...` against the configured S3/SeaweedFS. Prefers host aws; falls back
+# to a dockerized aws-cli. Endpoint host mapping mirrors pg_psql.
+aws_s3() {
+    local ep="${S3_ENDPOINT:-http://localhost:8333}"
+    if command -v aws >/dev/null 2>&1; then
+        ep="${ep/host.docker.internal/localhost}"
+        AWS_ACCESS_KEY_ID="${S3_ACCESS_KEY:-}" AWS_SECRET_ACCESS_KEY="${S3_SECRET_KEY:-}" \
+            aws --endpoint-url "$ep" s3 "$@"
+    else
+        # dockerized client: any host-loopback form must become the host-gateway
+        ep="${ep//127.0.0.1/host.docker.internal}"
+        ep="${ep//localhost/host.docker.internal}"
+        docker run --rm --add-host=host.docker.internal:host-gateway \
+            -e AWS_ACCESS_KEY_ID="${S3_ACCESS_KEY:-}" -e AWS_SECRET_ACCESS_KEY="${S3_SECRET_KEY:-}" \
+            "${LAKEHOUSE_AWSCLI_IMAGE:-amazon/aws-cli:latest}" --endpoint-url "$ep" s3 "$@"
+    fi
+}
+
+# Reject a database name that isn't a safe identifier before it is interpolated into
+# any SQL (review-handoff #3). Names originate from the JDBC-URL parse, MLFLOW_PG_DB,
+# and (historically) the MANIFEST — none fully trusted. Allow only [A-Za-z0-9_.-]
+# (the set legal for our DB names, matching detect_uc_backend's parse), so a value
+# containing a quote/semicolon/space cannot break out of the datname='...' literal or
+# the "..." identifier.
+pg_assert_valid_dbname() {
+    case "$1" in
+        "" | *[!a-zA-Z0-9_.-]*)
+            echo -e "  ${RED}!${NC} refusing unsafe database name: '$1'" >&2
+            return 1 ;;
+    esac
+    return 0
+}
+
+# Safe DROP sequence (T-1.5.4): capture owner -> terminate live backends -> DROP ->
+# CREATE with the original owner. Survives open connections to the target DB.
+pg_drop_recreate() {
+    local db="$1" owner
+    pg_assert_valid_dbname "$db" || return 1
+    owner=$(pg_psql -d postgres -tAc \
+        "SELECT pg_catalog.pg_get_userbyid(datdba) FROM pg_database WHERE datname='${db}'" \
+        2>/dev/null | tr -d '[:space:]' || true)
+    pg_psql -d postgres -c \
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${db}' AND pid <> pg_backend_pid();" \
+        >/dev/null 2>&1 || true
+    pg_psql -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS \"${db}\";" || return 1
+    if [ -n "$owner" ]; then
+        pg_psql -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"${db}\" OWNER \"${owner}\";" || return 1
+    else
+        pg_psql -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE \"${db}\";" || return 1
+    fi
+    return 0
+}
+
+# Runtime semantic validation (plan 1.18.2, U-66b/I-55). ONLY when the overlay is
+# active: resolve the effective targets and abort unless every database, bucket,
+# volume, and container name derives from the current run-id. Overlay-inactive
+# production reset is unrestricted (must not reintroduce the 1.14.3 defect).
+reset_semantic_gate() {
+    [ "${OVERLAY_ACTIVE:-false}" = "true" ] || return 0
+    local rid="${LAKEHOUSE_TEST_RUN_ID}"
+    local dbs buckets volumes containers v
+    dbs="$(reset_effective_db airflow) $(reset_effective_db iceberg_catalog) $(reset_effective_db mlflow)"
+    local uc
+    uc=$(detect_uc_backend)
+    [ "${uc%%:*}" = "postgresql" ] && dbs="$dbs $(reset_effective_db "${uc#postgresql:}")"
+    buckets="$(reset_effective_bucket)"
+    volumes=""
+    for v in $(reset_discover_volumes); do
+        volumes="$volumes $(reset_effective_volume "$v")"
+    done
+    containers="$(resolve_container_name spark-master-41) $(resolve_container_name kafka) \
+$(resolve_container_name unity-catalog) $(resolve_container_name mlflow) \
+$(resolve_container_name airflow-webserver)"
+    if ! overlay_validate_targets --runid "$rid" --active true \
+        --databases "$dbs" --buckets "$buckets" --volumes "$volumes" --containers "$containers"; then
+        echo -e "${RED}reset: overlay semantic validation FAILED${NC} — a resolved target is not scoped to run-id '${rid}'. Refusing to touch anything." >&2
+        return 1
+    fi
+    return 0
+}
+
+# The service keys currently running (by resolved container name), for restore.
+reset_running_services() {
+    local up=""
+    is_container_running "$(resolve_container_name spark-master-41)" && up="$up spark" || true
+    is_container_running "$(resolve_container_name kafka)" && up="$up kafka" || true
+    is_container_running "$(resolve_container_name unity-catalog)" && up="$up unity-catalog" || true
+    is_container_running "$(resolve_container_name airflow-webserver)" && up="$up airflow" || true
+    is_container_running "$(resolve_container_name mlflow)" && up="$up mlflow" || true
+    echo "$up"
+    return 0
+}
+
+# Resolved container names a service key owns — used to VERIFY quiescence actually
+# took effect (review-handoff #7), so destructive work never proceeds against a
+# writer that failed to stop.
+quiesce_containers_for() {
+    case "$1" in
+        spark)         echo "$(resolve_container_name spark-master-41) $(resolve_container_name spark-worker-41) $(resolve_container_name spark-connect-41)" ;;
+        kafka)         echo "$(resolve_container_name kafka) $(resolve_container_name zookeeper)" ;;
+        unity-catalog) resolve_container_name unity-catalog ;;
+        mlflow)        resolve_container_name mlflow ;;
+        airflow)       echo "$(resolve_container_name airflow-webserver) $(resolve_container_name airflow-scheduler) $(resolve_container_name airflow-triggerer)" ;;
+    esac
+}
+
+# Stop each service and CONFIRM its containers are actually down. Returns non-zero if
+# any remain running, so the caller can abort before touching data (a stop that
+# silently failed must not let a live writer race the deletion — review-handoff #7).
+reset_stop_services() {
+    local s c rc=0
+    for s in "$@"; do
+        echo -e "${YELLOW}Quiescing ${s}...${NC}"
+        cmd_stop "$s" >/dev/null 2>&1 || true
+        for c in $(quiesce_containers_for "$s"); do
+            if is_container_running "$c"; then
+                echo -e "  ${RED}!${NC} ${c} still running after quiesce" >&2
+                rc=1
+            fi
+        done
+    done
+    return "$rc"
+}
+
+# Quiesce the services that WRITE to a mode's targets (plan 1.15.3). --data keeps
+# Unity Catalog UP (its registrations are cleared via REST); --metadata stops the
+# DB clients; --all stops everything.
+# Returns non-zero if any writer for the mode failed to stop (propagated from
+# reset_stop_services). --data intentionally keeps Unity Catalog UP (its
+# registrations are cleared via REST), so UC is not in the --data set.
+reset_quiesce() {
+    case "$1" in
+        data)     reset_stop_services spark kafka mlflow airflow ;;
+        metadata) reset_stop_services unity-catalog mlflow airflow ;;
+        all)      reset_stop_services spark kafka unity-catalog mlflow airflow ;;
+    esac
+}
+
+# Restore the previously-running set — ONLY on success (plan 1.16.5 / 1.19.3).
+reset_restore_services() {
+    local s
+    for s in $1; do
+        echo -e "${YELLOW}Restarting ${s}...${NC}"
+        cmd_start "$s" >/dev/null 2>&1 || echo -e "  ${YELLOW}!${NC} ${s} did not come back cleanly; check ./lakehouse status"
+    done
+    return 0
+}
+
+reset_marker_path() { echo "$PROJECT_ROOT/.lakehouse-reset-interrupted"; }
+
+# On a FAILED destructive reset, leave services stopped and drop a marker with
+# recovery instructions (plan 1.16.5). doctor reports it in Checkpoint 5.
+reset_write_marker() {
+    local mode="$1"
+    cat > "$(reset_marker_path)" <<EOF
+interrupted-reset
+mode=${mode}
+timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+overlay_active=${OVERLAY_ACTIVE:-false}
+note=A destructive reset failed mid-operation. Services were left STOPPED to avoid
+note=compounding corruption by writing against half-deleted state. Inspect state,
+note=then restore from a backup ('./lakehouse restore --from <path>') or re-run reset.
+EOF
+    return 0
+}
+
+# --- per-mode deletions -----------------------------------------------------------
+
+# Metadata plane: drop+recreate the catalog/tracking databases, and remove the
+# metadata volumes. UC-on-H2 state is reset by the quiesce (down removes the
+# container + its ephemeral H2); a PostgreSQL-backed UC DB is dropped here.
+reset_delete_metadata() {
+    local keep_mlflow="$1" db
+    for db in $(reset_db_targets metadata "$keep_mlflow"); do
+        local eff
+        eff=$(reset_effective_db "$db")
+        echo -e "${YELLOW}Resetting database ${eff}...${NC}"
+        pg_drop_recreate "$eff" || return 1
+    done
+    # Metadata-owned named volumes (mlflow-data unless --keep-mlflow, uc-data).
+    local v vmode vname
+    for v in $(reset_discover_volumes); do
+        vmode=$(reset_volume_mode "$v")
+        case ",${vmode}," in *",metadata,"*) ;; *) continue ;; esac
+        [ "$keep_mlflow" = "true" ] && [ "$v" = "mlflow-data" ] && continue
+        vname=$(reset_effective_volume "$v")
+        docker volume rm "$vname" >/dev/null 2>&1 || echo -e "  ${YELLOW}!${NC} could not remove volume $vname (in use or absent)" >&2
+    done
+    return 0
+}
+
+# Data plane: empty the object-store prefixes, clear the catalog/tracking ROWS that
+# referenced them (only when the owning DB is NOT being dropped — i.e. --data, not
+# --all, which drops those DBs wholesale), and remove data volumes. Kafka
+# topics/checkpoints are NOT wiped in PR #0 (deferred) — the dry-run plan reflects that.
+reset_delete_data() {
+    local mode="$1"
+    local bucket
+    bucket=$(reset_effective_bucket)
+    echo -e "${YELLOW}Emptying s3://${bucket}/warehouse/ and mlflow-artifacts/...${NC}"
+    # Fail-stop on a genuine S3 error, but NOT on a missing bucket. An unreachable
+    # endpoint and an absent bucket both make `rm` exit non-zero, yet only the former
+    # is a real failure — a fresh stack whose bucket was never created has simply
+    # nothing to delete. So probe the endpoint (lists buckets; rc=0 iff reachable,
+    # even with zero buckets): if it is down we fail-stop (plan 1.15.3, I-52b);
+    # otherwise the rm's own failure is a benign missing-bucket/empty-prefix no-op.
+    if ! aws_s3 ls >/dev/null 2>&1; then
+        echo -e "  ${RED}!${NC} S3 endpoint unreachable — cannot empty object store" >&2
+        return 1
+    fi
+    aws_s3 rm "s3://${bucket}/warehouse/" --recursive >/dev/null 2>&1 || true
+    aws_s3 rm "s3://${bucket}/mlflow-artifacts/" --recursive >/dev/null 2>&1 || true
+    # Post-condition (review-handoff #8): the prefixes must actually be EMPTY. A
+    # permission error (AccessDenied) makes `rm` fail while objects remain, which the
+    # `|| true` above would otherwise mask into a false success. A missing bucket
+    # lists empty (benign). Fail-stop if anything survived the delete.
+    local remain
+    remain=$(aws_s3 ls "s3://${bucket}/warehouse/" --recursive 2>/dev/null | grep -c . || true)
+    remain=$((remain + $(aws_s3 ls "s3://${bucket}/mlflow-artifacts/" --recursive 2>/dev/null | grep -c . || true)))
+    if [ "$remain" -ne 0 ]; then
+        echo -e "  ${RED}!${NC} object store not empty after delete (${remain} object(s) remain) — check S3 permissions" >&2
+        return 1
+    fi
+
+    if [ "$mode" = "data" ]; then
+        # DBs survive in --data, so clear the dangling rows (plan 1.14.1, 1.18.4) —
+        # otherwise --data would manufacture the orphans I-32 forbids. Attempt ALL
+        # three (clear as much as possible), then FAIL-STOP if any genuinely failed
+        # (review-handoff #5): the object store is already emptied, so leaving stale
+        # catalog/tracking rows is exactly the orphaned state --data promises to
+        # avoid. reset_execute then writes a marker + leaves services stopped; the
+        # operator reconciles with `doctor` rather than trusting a false "complete".
+        # (Each helper returns 0 when its table/UC is simply absent — a clean/empty
+        # stack does not trip this.)
+        local clr_rc=0
+        reset_clear_uc_registrations || clr_rc=1
+        reset_clear_mlflow_runs || clr_rc=1
+        reset_clear_iceberg_rows || clr_rc=1
+        if [ "$clr_rc" -ne 0 ]; then
+            echo -e "  ${RED}!${NC} dangling-row cleanup incomplete — object store emptied but catalog/tracking rows remain; run './lakehouse doctor'" >&2
+            return 1
+        fi
+    fi
+
+    # Data-plane named volumes (spark-data, spark-logs).
+    local v vmode vname
+    for v in $(reset_discover_volumes); do
+        vmode=$(reset_volume_mode "$v")
+        case ",${vmode}," in *",data,"*) ;; *) continue ;; esac
+        vname=$(reset_effective_volume "$v")
+        docker volume rm "$vname" >/dev/null 2>&1 || echo -e "  ${YELLOW}!${NC} could not remove volume $vname (in use or absent)" >&2
+    done
+    return 0
+}
+
+# Clear UC table registrations, keeping catalogs and schemas. Reaches the RESOLVED
+# UC container's INTERNAL REST API via `docker exec` (curl is in the UC image), never
+# a host port — under an active overlay the run-scoped UC publishes no host port, so
+# hitting localhost:8081 would clobber the PRODUCTION Unity Catalog. It runs a small
+# python client that SHARES the resolved UC container's network namespace
+# (`docker run --network container:<uc>`), so localhost:8080 is always that exact
+# UC — the run-scoped one under an overlay, production otherwise — with no host-port
+# dependency (the UC image itself ships neither curl nor python). Skips when the
+# resolved UC container is not running.
+reset_clear_uc_registrations() {
+    local uc img rc=0
+    uc=$(resolve_container_name unity-catalog)
+    if ! is_container_running "$uc"; then
+        return 0  # no UC to clear (its registrations live in the container's H2)
+    fi
+    img="${LAKEHOUSE_HTTP_IMAGE:-python:3-alpine}"
+    docker run -i --rm --network "container:${uc}" --entrypoint python3 "$img" - <<'PY' 2>/dev/null || rc=$?
+import json, urllib.request
+api = "http://localhost:8080/api/2.1/unity-catalog"
+def req(method, path):
+    r = urllib.request.Request(api + path, method=method)
+    try:
+        with urllib.request.urlopen(r, timeout=10) as x:
+            return json.load(x) if method == "GET" else {}
+    except Exception:
+        return {}
+def pages(path, key):
+    # Follow next_page_token so ALL registrations are cleared, not just page 1
+    # (else --data would wipe objects yet leave later tables registered -> orphans).
+    sep = "&" if "?" in path else "?"
+    token = None
+    while True:
+        p = path if token is None else f"{path}{sep}page_token={token}"
+        d = req("GET", p)
+        for item in d.get(key, []):
+            yield item
+        token = d.get("next_page_token")
+        if not token:
+            break
+for cat in pages("/catalogs", "catalogs"):
+    c = cat["name"]
+    for sch in pages(f"/schemas?catalog_name={c}", "schemas"):
+        s = sch["name"]
+        # Materialize the FULL table list BEFORE deleting: UC's next_page_token is
+        # offset-based, so deleting while paginating would shift the cursor and skip
+        # later pages (leaving stale registrations). list-then-delete avoids that.
+        names = [t["name"] for t in pages(f"/tables?catalog_name={c}&schema_name={s}", "tables")]
+        for name in names:
+            req("DELETE", f"/tables/{c}.{s}.{name}")
+PY
+    if [ "$rc" -ne 0 ]; then
+        # Propagate a genuine failure (netns/image/UC unreachable) so --data can
+        # fail-stop rather than report success with tables still registered
+        # (review-handoff #5). A not-running UC returned 0 earlier; per-table DELETE
+        # errors are retried/observed by the caller's post-state, not swallowed here.
+        echo -e "  ${YELLOW}!${NC} UC registration clear failed (may be incomplete)" >&2
+        return "$rc"
+    fi
+    return 0
+}
+
+# Delete MLflow run records (mlflow is quiesced; act on its DB directly), keeping
+# experiments. TRUNCATE ... CASCADE removes runs plus every FK-dependent row
+# (metrics/params/tags/latest_metrics/inputs/input_tags) in one operation with
+# correct ordering — an ordered DELETE would trip MLflow's foreign keys. A no-op
+# when the MLflow schema is absent; a genuine failure is surfaced, not swallowed.
+reset_clear_mlflow_runs() {
+    local db
+    db=$(reset_effective_db mlflow)
+    if [ -z "$(pg_psql -d "$db" -tAc "SELECT to_regclass('runs')" 2>/dev/null | tr -d '[:space:]')" ]; then
+        return 0  # no runs table -> nothing to clear
+    fi
+    if ! pg_psql -d "$db" -c "TRUNCATE TABLE runs CASCADE;" >/dev/null 2>&1; then
+        echo -e "  ${YELLOW}!${NC} failed to clear MLflow run records in ${db}" >&2
+        return 1
+    fi
+    return 0
+}
+
+# Delete Iceberg JDBC-catalog table rows, keeping the database/namespaces. No-op if
+# the catalog table is absent; a genuine failure is surfaced.
+reset_clear_iceberg_rows() {
+    local db
+    db=$(reset_effective_db iceberg_catalog)
+    if [ -z "$(pg_psql -d "$db" -tAc "SELECT to_regclass('iceberg_tables')" 2>/dev/null | tr -d '[:space:]')" ]; then
+        return 0
+    fi
+    if ! pg_psql -d "$db" -c "DELETE FROM iceberg_tables;" >/dev/null 2>&1; then
+        echo -e "  ${YELLOW}!${NC} failed to clear iceberg_catalog rows in ${db}" >&2
+        return 1
+    fi
+    return 0
+}
+
+reset_do_deletions() {
+    local mode="$1" keep_mlflow="$2"
+    if [ "$mode" = "metadata" ] || [ "$mode" = "all" ]; then
+        reset_delete_metadata "$keep_mlflow" || return 1
+    fi
+    if [ "$mode" = "data" ] || [ "$mode" = "all" ]; then
+        reset_delete_data "$mode" || return 1
+    fi
+    return 0
+}
+
+# Orchestrate: semantic gate -> capture running set -> quiesce -> delete -> restore
+# ONLY on success; on failure leave services stopped + marker (plan 1.16.5).
+reset_execute() {
+    local mode="$1" keep_mlflow="$2"
+    reset_semantic_gate || return 1
+    rm -f "$(reset_marker_path)" 2>/dev/null || true
+
+    local running
+    running=$(reset_running_services)
+    # Quiesce and CONFIRM writers stopped BEFORE any deletion (review-handoff #7).
+    # If quiescence is incomplete, nothing has been deleted yet — restart the prior
+    # set and abort cleanly (no marker: state is unchanged).
+    if ! reset_quiesce "$mode"; then
+        reset_restore_services "$running"
+        echo -e "${RED}reset: could not quiesce all writers — aborting before any deletion.${NC} Nothing was changed." >&2
+        return 1
+    fi
+
+    if ! reset_do_deletions "$mode" "$keep_mlflow"; then
+        reset_write_marker "$mode"
+        echo -e "${RED}Reset FAILED mid-operation.${NC} Services left stopped to avoid compounding corruption." >&2
+        echo -e "  Recovery: restore from a backup or re-run reset. Marker: $(reset_marker_path)" >&2
+        return 1
+    fi
+
+    reset_restore_services "$running"
+    echo -e "${GREEN}Reset complete (mode: ${mode}).${NC}"
+    return 0
+}
+
+# ./lakehouse reset --data|--metadata|--all [--keep-mlflow] [--dry-run] [--yes]
+# Resolves the REAL configured targets (no ^ol_test_ pattern guard — the
+# fail-closed guard lives only in the test harness, plan 1.14.3 / U-54).
+cmd_reset() {
+    local mode="" keep_mlflow=false dry_run=false assume_yes=false modes_set=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --data)        mode="data";     modes_set=$((modes_set + 1)); shift ;;
+            --metadata)    mode="metadata"; modes_set=$((modes_set + 1)); shift ;;
+            --all)         mode="all";      modes_set=$((modes_set + 1)); shift ;;
+            --keep-mlflow) keep_mlflow=true; shift ;;
+            --dry-run)     dry_run=true;     shift ;;
+            --yes|-y)      assume_yes=true;  shift ;;
+            *) echo "reset: unknown argument '$1'" >&2; return 2 ;;
+        esac
+    done
+
+    # Flag validation (T-1.5.3b, plan 1.14.9): exactly one primary mode;
+    # --keep-mlflow only with --metadata.
+    if [ "$modes_set" -ne 1 ]; then
+        echo "reset: exactly one of --data / --metadata / --all is required" >&2
+        return 2
+    fi
+    if [ "$keep_mlflow" = true ] && [ "$mode" != "metadata" ]; then
+        echo "reset: --keep-mlflow is valid only with --metadata" >&2
+        return 2
+    fi
+
+    # --dry-run enumerates the plan and changes nothing; it bypasses confirmation
+    # because it destroys nothing (plan 1.13.5).
+    if [ "$dry_run" = true ]; then
+        local label="$mode"
+        [ "$keep_mlflow" = true ] && label="$mode --keep-mlflow"
+        echo "Reset plan (mode: ${label}) — DRY RUN, no changes will be made:"
+        reset_emit_plan "$mode" "$keep_mlflow"
+        if [ "$mode" = "metadata" ]; then
+            echo ""
+            reset_metadata_warning "$keep_mlflow"
+        fi
+        echo "No changes made (dry-run)."
+        return 0
+    fi
+
+    # The classified-orphan warning is shown before a real --metadata reset too.
+    if [ "$mode" = "metadata" ]; then
+        reset_metadata_warning "$keep_mlflow"
+    fi
+
+    # Destructive path requires confirmation: --yes, or an interactive 'yes'.
+    if [ "$assume_yes" != true ]; then
+        if [ -t 0 ]; then
+            echo -e "${RED}This will PERMANENTLY reset (mode: ${mode}).${NC} Type 'yes' to proceed:"
+            local reply
+            read -r reply
+            if [ "$reply" != "yes" ]; then
+                echo "Aborted."
+                return 1
+            fi
+        else
+            echo "reset: refusing a destructive reset without --yes (non-interactive)" >&2
+            return 1
+        fi
+    fi
+
+    reset_execute "$mode" "$keep_mlflow"
+}
+
+# --- backup / restore engine (Checkpoint 4, T-1.5.5 / T-1.5.5b / T-1.5.5c) --------
+#
+# backup and restore share ONE snapshot code path (backup_take_snapshot) and ONE
+# quiesce model (backup_quiesce_writers/backup_unquiesce_writers). The snapshot path
+# NEVER restarts services, so restore can take its pre-restore snapshot inside the
+# same quiesced window it later mutates in (plan 1.16.9). Quiescing uses `docker stop`
+# (container-preserving), NOT `docker compose down`, so a stopped UC container's H2
+# file survives for `docker cp` (plan 1.15.1) and restarts are cheap `docker start`s.
+
+# The app containers that WRITE to PostgreSQL / S3 / UC. The storage substrate itself
+# (host PostgreSQL + SeaweedFS) is intentionally excluded — it must stay up to be
+# dumped/synced. One resolved (overlay-aware) name per line.
+backup_writer_containers() {
+    local c
+    # Includes spark-mlflow-agent (logs MLflow runs) and jupyter (writes S3/UC/MLflow):
+    # backup/restore quiesce with per-container `docker stop`, so every writer must be
+    # named here — unlike reset, whose cmd_stop takes a whole compose file down. Names
+    # absent from the running set are skipped (is_container_running is false).
+    for c in spark-master-41 spark-worker-41 spark-connect-41 kafka zookeeper \
+             unity-catalog mlflow spark-mlflow-agent jupyter \
+             airflow-webserver airflow-scheduler airflow-triggerer; do
+        resolve_container_name "$c"
+    done
+}
+
+# Stop every currently-running writer, recording it in QUIESCED_WRITERS for restart.
+# (`while read` under process substitution runs in THIS shell, so the array persists.)
+backup_quiesce_writers() {
+    QUIESCED_WRITERS=()
+    local c rc=0
+    while read -r c; do
+        if is_container_running "$c"; then
+            QUIESCED_WRITERS+=("$c")
+            echo -e "${YELLOW}Quiescing ${c}...${NC}"
+            docker stop "$c" >/dev/null 2>&1 || true
+            # Confirm it actually stopped — a snapshot/mutation must not proceed while
+            # a writer is still live (review-handoff #7). Still recorded in
+            # QUIESCED_WRITERS so the caller restarts it on abort.
+            if is_container_running "$c"; then
+                echo -e "  ${RED}!${NC} ${c} still running after quiesce" >&2
+                rc=1
+            fi
+        fi
+    done < <(backup_writer_containers)
+    return "$rc"
+}
+
+# Restart the writers recorded by backup_quiesce_writers (docker start — layers intact).
+backup_unquiesce_writers() {
+    local c
+    for c in "${QUIESCED_WRITERS[@]}"; do
+        echo -e "${YELLOW}Restarting ${c}...${NC}"
+        docker start "$c" >/dev/null 2>&1 || echo -e "  ${YELLOW}!${NC} ${c} did not restart cleanly; check ./lakehouse status" >&2
+    done
+    return 0
+}
+
+# pg_dump a single database to <dir>/<db>.dump — custom format WITH --create, so the
+# archive carries CREATE DATABASE ... OWNER and object GRANTs (I-29 ownership/grants).
+# Prefers a host pg_dump; falls back to a dockerized client with <dir> mounted.
+pg_dump_db() {
+    local db="$1" dir="$2" host="${POSTGRES_HOST:-localhost}"
+    if command -v pg_dump >/dev/null 2>&1; then
+        host="${host/host.docker.internal/localhost}"
+        PGPASSWORD="${POSTGRES_PASSWORD:-}" pg_dump -h "$host" -p "${POSTGRES_PORT:-5432}" \
+            -U "${POSTGRES_USER:-postgres}" -Fc --create -d "$db" -f "${dir}/${db}.dump"
+    else
+        host="${host//127.0.0.1/host.docker.internal}"; host="${host//localhost/host.docker.internal}"
+        docker run --rm --add-host=host.docker.internal:host-gateway \
+            -e PGPASSWORD="${POSTGRES_PASSWORD:-}" -v "${dir}:/backup" \
+            "${LAKEHOUSE_PG_CLIENT_IMAGE:-postgres:15-alpine}" \
+            pg_dump -h "$host" -p "${POSTGRES_PORT:-5432}" -U "${POSTGRES_USER:-postgres}" \
+            -Fc --create -d "$db" -f "/backup/${db}.dump"
+    fi
+}
+
+# Restore a single database from <dir>/<db>.dump. --create --clean --if-exists drops
+# and recreates the DB with its backed-up owner, then restores objects+grants. We
+# terminate live backends first so the DROP can proceed (the writers are already
+# quiesced; this clears any stray session).
+pg_restore_db() {
+    local db="$1" dir="$2" host="${POSTGRES_HOST:-localhost}"
+    pg_assert_valid_dbname "$db" || return 1
+    pg_psql -d postgres -c \
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname='${db}' AND pid <> pg_backend_pid();" \
+        >/dev/null 2>&1 || true
+    if command -v pg_restore >/dev/null 2>&1; then
+        host="${host/host.docker.internal/localhost}"
+        PGPASSWORD="${POSTGRES_PASSWORD:-}" pg_restore -h "$host" -p "${POSTGRES_PORT:-5432}" \
+            -U "${POSTGRES_USER:-postgres}" --create --clean --if-exists -d postgres "${dir}/${db}.dump"
+    else
+        host="${host//127.0.0.1/host.docker.internal}"; host="${host//localhost/host.docker.internal}"
+        docker run --rm --add-host=host.docker.internal:host-gateway \
+            -e PGPASSWORD="${POSTGRES_PASSWORD:-}" -v "${dir}:/backup:ro" \
+            "${LAKEHOUSE_PG_CLIENT_IMAGE:-postgres:15-alpine}" \
+            pg_restore -h "$host" -p "${POSTGRES_PORT:-5432}" -U "${POSTGRES_USER:-postgres}" \
+            --create --clean --if-exists -d postgres "/backup/${db}.dump"
+    fi
+}
+
+# Sync between S3 and a LOCAL directory. Prefers host aws; else a dockerized aws-cli
+# with the local dir mounted. Endpoint host mapping mirrors aws_s3().
+#   download : s3://<bucket>/ -> <localdir>/
+#   upload   : <localdir>/    -> s3://<bucket>/ --delete  (removes strays, T-1.5.5b)
+s3_sync() {
+    local direction="$1" bucket="$2" localdir="$3"
+    local ep="${S3_ENDPOINT:-http://localhost:8333}"
+    local extra=()
+    if command -v aws >/dev/null 2>&1; then
+        ep="${ep/host.docker.internal/localhost}"
+        local src dst
+        if [ "$direction" = download ]; then src="s3://${bucket}/"; dst="${localdir}/"
+        else src="${localdir}/"; dst="s3://${bucket}/"; extra=(--delete); fi
+        AWS_ACCESS_KEY_ID="${S3_ACCESS_KEY:-}" AWS_SECRET_ACCESS_KEY="${S3_SECRET_KEY:-}" \
+            aws --endpoint-url "$ep" s3 sync "$src" "$dst" "${extra[@]}"
+    else
+        ep="${ep//127.0.0.1/host.docker.internal}"; ep="${ep//localhost/host.docker.internal}"
+        local src dst
+        if [ "$direction" = download ]; then src="s3://${bucket}/"; dst="/data/"
+        else src="/data/"; dst="s3://${bucket}/"; extra=(--delete); fi
+        docker run --rm --add-host=host.docker.internal:host-gateway \
+            -e AWS_ACCESS_KEY_ID="${S3_ACCESS_KEY:-}" -e AWS_SECRET_ACCESS_KEY="${S3_SECRET_KEY:-}" \
+            -v "${localdir}:/data" \
+            "${LAKEHOUSE_AWSCLI_IMAGE:-amazon/aws-cli:latest}" \
+            --endpoint-url "$ep" s3 sync "$src" "$dst" "${extra[@]}"
+    fi
+}
+
+# tar a docker named volume's contents to <dir>/<vol>.tar (best-effort — an absent
+# volume is skipped, not an error: not every declared volume is materialised).
+volume_backup() {
+    local vol="$1" dir="$2"
+    if ! docker volume inspect "$vol" >/dev/null 2>&1; then
+        echo -e "  ${YELLOW}!${NC} volume ${vol} absent — skipping" >&2
+        return 0
+    fi
+    docker run --rm -v "${vol}:/v:ro" -v "${dir}:/backup" \
+        "${LAKEHOUSE_ALPINE_IMAGE:-alpine:latest}" \
+        tar cf "/backup/${vol}.tar" -C /v . || return 1
+    return 0
+}
+
+# Restore a docker named volume from its tar (recreate volume, wipe, extract).
+volume_restore() {
+    local vol="$1" tarfile="$2"
+    [ -f "$tarfile" ] || return 0
+    docker volume create "$vol" >/dev/null 2>&1 || true
+    docker run --rm -v "${vol}:/v" -v "$(dirname "$tarfile"):/backup:ro" \
+        "${LAKEHOUSE_ALPINE_IMAGE:-alpine:latest}" \
+        sh -c "rm -rf /v/..?* /v/.[!.]* /v/* 2>/dev/null; tar xf \"/backup/$(basename "$tarfile")\" -C /v" || return 1
+    return 0
+}
+
+# Copy the resolved UC container's H2 file OUT to <dir>/uc/ (docker cp works on a
+# stopped container, so the file is at rest during the quiesced window). Best-effort.
+uc_h2_backup() {
+    local dir="$1" uc
+    uc=$(resolve_container_name unity-catalog)
+    if ! docker container inspect "$uc" >/dev/null 2>&1; then
+        echo -e "  ${YELLOW}!${NC} UC container ${uc} absent — no H2 state to back up" >&2
+        return 0
+    fi
+    mkdir -p "${dir}/uc"
+    docker cp "${uc}:/home/unitycatalog/etc/db/h2db.mv.db" "${dir}/uc/h2db.mv.db" 2>/dev/null \
+        || echo -e "  ${YELLOW}!${NC} UC H2 file not found in ${uc}" >&2
+    return 0
+}
+
+# Copy an H2 file back INTO the resolved (stopped) UC container; the caller restarts
+# UC afterwards so it reloads the restored state. Hard-fails if UC is absent.
+uc_h2_restore() {
+    local dir="$1" uc
+    uc=$(resolve_container_name unity-catalog)
+    [ -f "${dir}/uc/h2db.mv.db" ] || return 0
+    if ! docker container inspect "$uc" >/dev/null 2>&1; then
+        echo -e "  ${RED}!${NC} UC container ${uc} absent — cannot restore H2 state" >&2
+        return 1
+    fi
+    docker cp "${dir}/uc/h2db.mv.db" "${uc}:/home/unitycatalog/etc/db/h2db.mv.db" || return 1
+    return 0
+}
+
+# Take a full snapshot into <dir>. ASSUMES the writers are already quiesced. Does NOT
+# quiesce or restart (so restore can reuse it inside one window, plan 1.16.9). Writes
+# MANIFEST LAST — its presence is the success marker restore checks. Fail-stop.
+backup_take_snapshot() {
+    local dir="$1"
+    # Clear OUR OWN subdirs so a snapshot is always an authoritative mirror even when
+    # an explicit --out is reused: the S3 download sync has no --delete, so a stale
+    # object from a prior snapshot would otherwise survive and be re-uploaded on a
+    # later restore. Scoped to the four subdirs we write — never the whole $dir.
+    rm -rf "${dir}/pg" "${dir}/s3" "${dir}/volumes" "${dir}/uc"
+    mkdir -p "${dir}/pg" "${dir}/s3" "${dir}/volumes"
+
+    local bucket uc db dbs="" vols="" v vn
+    bucket=$(reset_effective_bucket)
+    uc=$(detect_uc_backend)
+
+    # PostgreSQL — every platform database (+ a PostgreSQL-backed UC DB, if any).
+    for db in airflow iceberg_catalog mlflow; do dbs="${dbs} $(reset_effective_db "$db")"; done
+    [ "${uc%%:*}" = postgresql ] && dbs="${dbs} $(reset_effective_db "${uc#postgresql:}")"
+    for db in $dbs; do
+        echo -e "${YELLOW}Dumping database ${db}...${NC}"
+        pg_dump_db "$db" "${dir}/pg" || return 1
+    done
+
+    # S3 objects.
+    echo -e "${YELLOW}Syncing s3://${bucket}/ ...${NC}"
+    s3_sync download "$bucket" "${dir}/s3" || return 1
+
+    # UC state via docker cp (only when the backend is embedded H2).
+    if [ "$uc" = h2 ]; then
+        echo -e "${YELLOW}Copying Unity Catalog H2 state...${NC}"
+        uc_h2_backup "$dir" || return 1
+    fi
+
+    # Named volumes (absent ones skipped).
+    for v in $(reset_discover_volumes); do
+        vn=$(reset_effective_volume "$v")
+        echo -e "${YELLOW}Archiving volume ${vn}...${NC}"
+        volume_backup "$vn" "${dir}/volumes" || return 1
+        vols="${vols} ${vn}"
+    done
+
+    {
+        echo "lakehouse-backup"
+        echo "version=1"
+        echo "timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "overlay_active=${OVERLAY_ACTIVE:-false}"
+        echo "run_id=${LAKEHOUSE_TEST_RUN_ID:-}"
+        echo "bucket=${bucket}"
+        echo "uc_backend=${uc}"
+        echo "databases=${dbs# }"
+        echo "volumes=${vols# }"
+    } > "${dir}/MANIFEST"
+    return 0
+}
+
+# ./lakehouse backup [--out <dir>] [--yes]
+# Non-destructive: dumps every PostgreSQL DB, syncs S3, archives named volumes, and
+# copies UC's H2 (T-1.5.5). Quiesces writers for a consistent snapshot, then ALWAYS
+# restarts them — backup mutates nothing (I-52a, plan 1.16.5). Prints the artifact
+# path and a ready-to-paste `restore --from` command (U-63).
+cmd_backup() {
+    local out=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --out)     [ $# -ge 2 ] || { echo "backup: --out requires a value" >&2; return 2; }; out="$2"; shift 2 ;;
+            --yes|-y)  shift ;;  # accepted for symmetry; backup needs no confirmation
+            *) echo "backup: unknown argument '$1'" >&2; return 2 ;;
+        esac
+    done
+    header "BACKUP"
+
+    # Overlay safety (same gate reset/restore run): backup quiesces containers and
+    # snapshots the effective bucket/DBs. LAKEHOUSE_ENV_FILE is OPTIONAL under an
+    # overlay (plan 1.16.1), so if it is unset the production .env is sourced and
+    # S3_BUCKET / MLFLOW_PG_DB could resolve to PRODUCTION names — backup would then
+    # quiesce test containers while snapshotting the real PG/S3. Abort unless every
+    # effective target is run-scoped. Overlay-inactive: unrestricted (returns 0).
+    reset_semantic_gate || return 1
+
+    if [ -z "$out" ]; then
+        local tag="" ts
+        ts=$(date -u +%Y%m%dT%H%M%SZ)
+        [ "${OVERLAY_ACTIVE:-false}" = true ] && tag="-${LAKEHOUSE_TEST_RUN_ID}"
+        out="${PROJECT_ROOT}/backups/lakehouse-backup-${ts}${tag}"
+    fi
+    mkdir -p "$out"
+
+    if ! backup_quiesce_writers; then
+        backup_unquiesce_writers
+        echo -e "${RED}Backup aborted:${NC} could not quiesce all writers — refusing to take a torn snapshot." >&2
+        return 1
+    fi
+    local rc=0
+    backup_take_snapshot "$out" || rc=$?
+    backup_unquiesce_writers  # always — backup is non-mutating
+
+    if [ "$rc" -ne 0 ]; then
+        echo -e "${RED}Backup FAILED.${NC} Partial artifact left at: ${out}" >&2
+        return 1
+    fi
+    echo -e "${GREEN}Backup complete:${NC} ${out}"
+    echo "Restore it with:"
+    echo "  ./lakehouse restore --from ${out}"
+    return 0
+}
+
+restore_marker_path() { echo "$PROJECT_ROOT/.lakehouse-restore-interrupted"; }
+
+# On a FAILED restore, leave services stopped and drop a marker with the exact
+# rollback command (plan 1.15.4 / 1.17.8). doctor reports it in Checkpoint 5.
+restore_write_marker() {
+    local from="$1" snap="$2"
+    cat > "$(restore_marker_path)" <<EOF
+interrupted-restore
+from=${from}
+pre_restore_snapshot=${snap}
+timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+overlay_active=${OVERLAY_ACTIVE:-false}
+note=A restore failed mid-operation. Services were left STOPPED. Roll back with:
+note=  ./lakehouse restore --from ${snap} --yes
+EOF
+    return 0
+}
+
+# Reject a restore whose MANIFEST targets don't match the CURRENT stack's effective
+# targets, unless --force (review-handoff #2). Without this, the overlay-inactive
+# (production) path applied whatever databases/bucket/volumes the MANIFEST named,
+# letting a crafted or mistakenly-swapped artifact drive `pg_restore --create --clean`
+# and `s3 sync --delete` at arbitrary names reachable with local creds. Matching the
+# effective helpers also enforces run-scoping under an overlay (they yield run-scoped
+# names there), so this subsumes the previous overlay-only MANIFEST check.
+restore_validate_targets() {
+    local dir="$1" force="$2"
+    local m_bucket m_dbs m_vols
+    m_bucket=$(grep '^bucket=' "${dir}/MANIFEST" | cut -d= -f2-)
+    m_dbs=$(grep '^databases=' "${dir}/MANIFEST" | cut -d= -f2-)
+    m_vols=$(grep '^volumes=' "${dir}/MANIFEST" | cut -d= -f2-)
+
+    local exp_bucket exp_dbs="" exp_vols="" db v uc
+    exp_bucket=$(reset_effective_bucket)
+    for db in airflow iceberg_catalog mlflow; do exp_dbs="${exp_dbs} $(reset_effective_db "$db")"; done
+    uc=$(detect_uc_backend)
+    [ "${uc%%:*}" = postgresql ] && exp_dbs="${exp_dbs} $(reset_effective_db "${uc#postgresql:}")"
+    for v in $(reset_discover_volumes); do exp_vols="${exp_vols} $(reset_effective_volume "$v")"; done
+
+    local mismatch=""
+    [ "$m_bucket" = "$exp_bucket" ] || mismatch="${mismatch} bucket(manifest='${m_bucket}',expected='${exp_bucket}')"
+    for db in $m_dbs; do
+        case " $exp_dbs " in *" $db "*) ;; *) mismatch="${mismatch} db('${db}')" ;; esac
+    done
+    for v in $m_vols; do
+        case " $exp_vols " in *" $v "*) ;; *) mismatch="${mismatch} volume('${v}')" ;; esac
+    done
+
+    [ -z "$mismatch" ] && return 0
+    if [ "$force" = true ]; then
+        echo -e "  ${YELLOW}!${NC} restore: MANIFEST targets differ from the current stack; proceeding (--force):${mismatch}" >&2
+        return 0
+    fi
+    echo -e "${RED}restore: MANIFEST targets do not match the current stack — refusing.${NC} Use --force to override. Offending:${mismatch}" >&2
+    return 1
+}
+
+# Apply a backup from <dir> (fail-stop, no restart). ASSUMES a quiesced window.
+# Recreates databases (owner/grants from the dump), syncs S3 with --delete, restores
+# volumes, and reinstates UC's H2. Target-safety is enforced earlier by
+# restore_validate_targets (MANIFEST must match the current stack's effective targets,
+# which also yields run-scoping under an overlay); this function assumes that passed.
+restore_apply() {
+    local dir="$1"
+    if [ ! -f "${dir}/MANIFEST" ]; then
+        echo -e "${RED}restore: no MANIFEST in ${dir} — not a complete backup${NC}" >&2
+        return 1
+    fi
+    local bucket dbs vols ucb
+    bucket=$(grep '^bucket=' "${dir}/MANIFEST" | cut -d= -f2-)
+    dbs=$(grep '^databases=' "${dir}/MANIFEST" | cut -d= -f2-)
+    vols=$(grep '^volumes=' "${dir}/MANIFEST" | cut -d= -f2-)
+    ucb=$(grep '^uc_backend=' "${dir}/MANIFEST" | cut -d= -f2-)
+
+    local db v
+    for db in $dbs; do
+        echo -e "${YELLOW}Restoring database ${db}...${NC}"
+        pg_restore_db "$db" "${dir}/pg" || return 1
+    done
+
+    echo -e "${YELLOW}Restoring objects into s3://${bucket}/ (sync --delete)...${NC}"
+    aws_s3 mb "s3://${bucket}" >/dev/null 2>&1 || true  # ensure the bucket exists first
+    s3_sync upload "$bucket" "${dir}/s3" || return 1
+
+    for v in $vols; do
+        echo -e "${YELLOW}Restoring volume ${v}...${NC}"
+        volume_restore "$v" "${dir}/volumes/${v}.tar" || return 1
+    done
+
+    if [ "$ucb" = h2 ] && [ -f "${dir}/uc/h2db.mv.db" ]; then
+        echo -e "${YELLOW}Restoring Unity Catalog H2 state...${NC}"
+        uc_h2_restore "$dir" || return 1
+    fi
+    return 0
+}
+
+# ./lakehouse restore --from <path> [--yes] [--force]
+# FAIL-STOP and RECOVERABLE, not atomic (plan 1.15.4). Inside a SINGLE quiesced
+# window (plan 1.16.9): quiesce -> pre-restore snapshot (same snapshot path, no
+# restart) -> mutate. On failure: leave services stopped, preserve a marker, print
+# the rollback command. On success: clear the marker and restart the prior set.
+cmd_restore() {
+    local from="" assume_yes=false force=false
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --from)    [ $# -ge 2 ] || { echo "restore: --from requires a value" >&2; return 2; }; from="$2"; shift 2 ;;
+            --yes|-y)  assume_yes=true; shift ;;
+            --force)   force=true; shift ;;
+            *) echo "restore: unknown argument '$1'" >&2; return 2 ;;
+        esac
+    done
+
+    if [ -z "$from" ]; then
+        echo "restore: --from <path> is required" >&2
+        return 2
+    fi
+    if [ ! -d "$from" ] || [ ! -f "${from}/MANIFEST" ]; then
+        echo "restore: '${from}' is not a complete backup artifact (missing MANIFEST)" >&2
+        return 2
+    fi
+    header "RESTORE"
+
+    if [ "$assume_yes" != true ]; then
+        if [ -t 0 ]; then
+            echo -e "${RED}This REPLACES databases, object storage (sync --delete), and volumes from ${from}.${NC} Type 'yes' to proceed:"
+            local reply
+            read -r reply
+            [ "$reply" = yes ] || { echo "Aborted."; return 1; }
+        else
+            echo "restore: refusing a destructive restore without --yes (non-interactive)" >&2
+            return 1
+        fi
+    fi
+
+    reset_semantic_gate || return 1
+
+    # Reject a MANIFEST whose targets are not this stack's (review-handoff #2) BEFORE
+    # touching any service; --force overrides.
+    restore_validate_targets "$from" "$force" || return 1
+
+    if ! backup_quiesce_writers; then
+        backup_unquiesce_writers
+        echo -e "${RED}Restore aborted:${NC} could not quiesce all writers — refusing to mutate with a live writer." >&2
+        return 1
+    fi
+
+    local ts snap
+    ts=$(date -u +%Y%m%dT%H%M%SZ)
+    snap="${PROJECT_ROOT}/backups/pre-restore-${ts}"
+    mkdir -p "$snap"
+    echo -e "${YELLOW}Taking pre-restore snapshot at ${snap}...${NC}"
+    if ! backup_take_snapshot "$snap"; then
+        # Failed BEFORE any mutation — safe to restart and abort with nothing changed.
+        backup_unquiesce_writers
+        echo -e "${RED}restore: pre-restore snapshot failed; nothing was changed.${NC}" >&2
+        return 1
+    fi
+
+    if ! restore_apply "$from"; then
+        restore_write_marker "$from" "$snap"
+        echo -e "${RED}Restore FAILED mid-operation.${NC} Services left STOPPED to avoid compounding corruption." >&2
+        echo -e "  Pre-restore snapshot: ${snap}" >&2
+        echo -e "  Roll back with: ./lakehouse restore --from ${snap} --yes" >&2
+        echo -e "  Marker: $(restore_marker_path)" >&2
+        return 1
+    fi
+
+    rm -f "$(restore_marker_path)" 2>/dev/null || true
+    backup_unquiesce_writers
+    echo -e "${GREEN}Restore complete from ${from}.${NC}"
+    echo -e "  Pre-restore snapshot kept at: ${snap}"
+    return 0
+}
+
+# --- doctor: orphan / inconsistency detector (Checkpoint 5, T-1.5.6) --------------
+#
+# doctor is READ-ONLY. It gathers a normalized inventory from S3 + Unity Catalog +
+# the MLflow database, then a PURE classifier (doctor_classify) maps it to FOUR
+# orphan classes (plan 1.19.1) — never a single aggregate count:
+#   recoverable-delta       Delta prefix with objects but no UC registration
+#   doubtful-iceberg        Iceberg prefix with no UC registration (UC OSS 0.4.x has
+#                           no Iceberg write endpoints, so re-registration may fail)
+#   unrecoverable-mlflow    mlflow-artifacts/ bytes whose run record is gone
+#   dangling-catalog-entry  UC row with empty/null location OR a valid URI resolving
+#                           to zero objects (plan 1.16.8)
+# The INVERSE MLflow direction (run record -> missing bytes) is undecidable without a
+# durable artifact manifest and is OMITTED (plan 1.19.1); a healthy artifact-free run
+# is therefore never flagged (U-62).
+
+# Pure classifier. Reads normalized inventory lines on stdin, emits one
+# "DOCTOR class=<c> name=<n>" per orphan. Distinct, Docker-free code path (U-34).
+# Line grammar (space-separated key=val, name= MUST be last so a value may contain
+# anything except a literal " name="):
+#   prefix   type=<delta|iceberg> registered=<yes|no> name=<loc>
+#   artifact run_known=<yes|no> name=<key>
+#   uc-row   objects=<N|NA> location_empty=<yes|no> name=<full>
+doctor_classify() {
+    local line kind meta name
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        kind="${line%% *}"
+        # Classify ONLY the metadata tokens, never the trailing name= value: an S3
+        # path may itself contain a segment like "type=iceberg" or "registered=yes",
+        # which would otherwise be misread as a token. name= is guaranteed last.
+        meta="${line%% name=*}"
+        name="${line#*name=}"
+        case "$kind" in
+            prefix)
+                case " $meta " in
+                    *" registered=yes "*) : ;;  # registered -> healthy, not an orphan
+                    *"type=delta"*)   echo "DOCTOR class=recoverable-delta name=${name}" ;;
+                    *"type=iceberg"*) echo "DOCTOR class=doubtful-iceberg name=${name}" ;;
+                esac
+                ;;
+            artifact)
+                case " $meta " in
+                    *" run_known=no "*) echo "DOCTOR class=unrecoverable-mlflow name=${name}" ;;
+                esac
+                ;;
+            uc-row)
+                case " $meta " in
+                    *" location_empty=yes "*) echo "DOCTOR class=dangling-catalog-entry name=${name}" ;;
+                    *" objects=0 "*)          echo "DOCTOR class=dangling-catalog-entry name=${name}" ;;
+                esac
+                ;;
+        esac
+    done
+    return 0
+}
+
+# All UC table rows as TSV "<catalog.schema.table>\t<storage_location>". Reached via
+# the resolved UC container's netns (same transport as reset_clear_uc_registrations)
+# so it targets the run-scoped UC under an overlay and production UC otherwise. Empty
+# when UC is not running.
+doctor_uc_rows() {
+    local uc img
+    uc=$(resolve_container_name unity-catalog)
+    is_container_running "$uc" || return 0
+    img="${LAKEHOUSE_HTTP_IMAGE:-python:3-alpine}"
+    docker run -i --rm --network "container:${uc}" --entrypoint python3 "$img" - <<'PY' 2>/dev/null || true
+import json, urllib.request
+api = "http://localhost:8080/api/2.1/unity-catalog"
+def get(path):
+    try:
+        with urllib.request.urlopen(api + path, timeout=10) as x:
+            return json.load(x)
+    except Exception:
+        return {}
+def pages(path, key):
+    # Follow next_page_token so doctor sees ALL rows, not just page 1 (else it would
+    # under-report dangling entries and mis-flag healthy prefixes as unregistered).
+    sep = "&" if "?" in path else "?"
+    token = None
+    while True:
+        p = path if token is None else f"{path}{sep}page_token={token}"
+        d = get(p)
+        for item in d.get(key, []):
+            yield item
+        token = d.get("next_page_token")
+        if not token:
+            break
+for cat in pages("/catalogs", "catalogs"):
+    c = cat["name"]
+    for sch in pages(f"/schemas?catalog_name={c}", "schemas"):
+        s = sch["name"]
+        for t in pages(f"/tables?catalog_name={c}&schema_name={s}", "tables"):
+            loc = (t.get("storage_location") or "").rstrip("/")
+            print(f"{c}.{s}.{t['name']}\t{loc}")
+PY
+}
+
+# Normalized S3 warehouse inventory: one "prefix" line per Delta/Iceberg table prefix
+# under warehouse/, tagged registered=yes|no by cross-referencing UC's storage
+# locations. A Delta prefix contains _delta_log/; an Iceberg prefix contains
+# metadata/*.metadata.json.
+doctor_inventory_s3_warehouse() {
+    local bucket reg keys
+    bucket=$(reset_effective_bucket)
+    reg="$(doctor_uc_rows | cut -f2 | grep -v '^$' || true)"
+    keys="$(aws_s3 ls "s3://${bucket}/warehouse/" --recursive 2>/dev/null | awk '{$1=$2=$3=""; sub(/^[[:space:]]+/,""); print}' || true)"
+
+    printf '%s\n' "$keys" | grep '/_delta_log/' 2>/dev/null \
+        | sed -E 's#/_delta_log/.*$##' | sort -u | while read -r p; do
+        [ -n "$p" ] || continue
+        loc="s3://${bucket}/${p}"
+        if printf '%s\n' "$reg" | grep -qxF "$loc"; then
+            echo "prefix type=delta registered=yes name=${loc}"
+        else
+            echo "prefix type=delta registered=no name=${loc}"
+        fi
+    done
+
+    printf '%s\n' "$keys" | grep -E '/metadata/[^/]*\.metadata\.json$' 2>/dev/null \
+        | sed -E 's#/metadata/[^/]*$##' | sort -u | while read -r p; do
+        [ -n "$p" ] || continue
+        loc="s3://${bucket}/${p}"
+        if printf '%s\n' "$reg" | grep -qxF "$loc"; then
+            echo "prefix type=iceberg registered=yes name=${loc}"
+        else
+            echo "prefix type=iceberg registered=no name=${loc}"
+        fi
+    done
+    return 0
+}
+
+# Normalized MLflow inventory: one "artifact" line per per-run artifact object, tagged
+# run_known=yes|no by cross-referencing the run id (the 32-hex path segment) against
+# the mlflow runs table. Keys without a run-id segment are ambiguous and skipped (no
+# false positives). Skipped entirely when the runs table is absent (MLflow not set
+# up -> nothing decidable, plan 1.19.1).
+doctor_inventory_mlflow() {
+    local bucket db known keys run
+    bucket=$(reset_effective_bucket)
+    db=$(reset_effective_db mlflow)
+    if [ -z "$(pg_psql -d "$db" -tAc "SELECT to_regclass('runs')" 2>/dev/null | tr -d '[:space:]')" ]; then
+        return 0
+    fi
+    known="$(pg_psql -d "$db" -tAc 'SELECT run_uuid FROM runs' 2>/dev/null | tr -d '\r' || true)"
+    keys="$(aws_s3 ls "s3://${bucket}/mlflow-artifacts/" --recursive 2>/dev/null | awk '{$1=$2=$3=""; sub(/^[[:space:]]+/,""); print}' || true)"
+    printf '%s\n' "$keys" | while read -r k; do
+        [ -n "$k" ] || continue
+        run="$(printf '%s\n' "$k" | tr '/' '\n' | grep -iE '^[0-9a-f]{32}$' | head -1)"
+        [ -n "$run" ] || continue
+        if printf '%s\n' "$known" | grep -qxF "$run"; then
+            echo "artifact run_known=yes name=s3://${bucket}/${k}"
+        else
+            echo "artifact run_known=no name=s3://${bucket}/${k}"
+        fi
+    done
+    return 0
+}
+
+# Normalized UC inventory: one "uc-row" line per registered table, tagging the
+# dangling inputs — empty/null storage_location, or a valid URI whose prefix has zero
+# objects (plan 1.16.8).
+doctor_inventory_uc() {
+    local name loc n
+    # If S3 is unreachable we cannot tell an empty prefix (rc=1, no output) from a
+    # listing failure, so a naive count would report objects=0 and flag EVERY healthy
+    # table as dangling. Probe the bucket root once (rc=0 iff reachable, even empty);
+    # when it fails, emit objects=unknown — which doctor_classify never flags.
+    local s3_ok=1
+    aws_s3 ls "s3://$(reset_effective_bucket)/" >/dev/null 2>&1 || s3_ok=0
+    while IFS=$'\t' read -r name loc; do
+        [ -n "$name" ] || continue
+        if [ -z "$loc" ]; then
+            echo "uc-row objects=NA location_empty=yes name=${name}"
+            continue
+        fi
+        if [ "$s3_ok" -ne 1 ]; then
+            echo "uc-row objects=unknown location_empty=no name=${name}"
+            continue
+        fi
+        n="$(aws_s3 ls "${loc}/" --recursive 2>/dev/null | grep -c . || true)"
+        echo "uc-row objects=${n:-0} location_empty=no name=${name}"
+    done < <(doctor_uc_rows)
+    return 0
+}
+
+doctor_gather_inventory() {
+    doctor_inventory_s3_warehouse
+    doctor_inventory_mlflow
+    doctor_inventory_uc
+    return 0
+}
+
+# Print one class section (skipped when empty). Never a single aggregate count
+# (T-1.5.6): each class is reported separately with its own items.
+doctor_report_class() {
+    local findings="$1" cls="$2" desc="$3" items n
+    items="$(printf '%s\n' "$findings" | grep "class=${cls} " | sed "s/^DOCTOR class=${cls} name=/  - /" || true)"
+    n=$(printf '%s\n' "$items" | grep -c '^  - ' || true)
+    [ "$n" -eq 0 ] && return 0
+    echo -e "${YELLOW}[${cls}]${NC} ${desc} — ${n}:"
+    printf '%s\n' "$items"
+    return 0
+}
+
+# ./lakehouse doctor — report orphaned data / catalog inconsistencies + any
+# interrupted reset/restore markers. Read-only; exits 0 (advisory).
+cmd_doctor() {
+    header "DOCTOR"
+    local had=false
+
+    if [ -f "$(reset_marker_path)" ]; then
+        had=true
+        echo -e "${RED}! interrupted reset detected${NC} — a destructive reset did not complete:"
+        sed 's/^/    /' "$(reset_marker_path)"
+        echo ""
+    fi
+    if [ -f "$(restore_marker_path)" ]; then
+        had=true
+        echo -e "${RED}! interrupted restore detected${NC} — a restore did not complete:"
+        sed 's/^/    /' "$(restore_marker_path)"
+        echo ""
+    fi
+
+    local findings
+    findings="$(doctor_gather_inventory | doctor_classify)"
+    if [ -n "$findings" ]; then had=true; fi
+
+    doctor_report_class "$findings" recoverable-delta \
+        "recoverable Delta prefixes (objects present, no UC registration — re-registerable from the Delta log)"
+    doctor_report_class "$findings" doubtful-iceberg \
+        "doubtful Iceberg prefixes (UC OSS 0.4.x exposes no Iceberg write endpoints — re-registration may be impossible)"
+    doctor_report_class "$findings" unrecoverable-mlflow \
+        "UNRECOVERABLE MLflow artifacts (bytes whose run record is gone)"
+    doctor_report_class "$findings" dangling-catalog-entry \
+        "dangling catalog entries (UC row with empty location or a URI resolving to zero objects)"
+
+    if [ "$had" = false ]; then
+        echo -e "${GREEN}No orphans or inconsistencies detected.${NC}"
+    fi
+    return 0
+}
+
 # Help
+# Hidden introspection command for the test harness (plan T-1.5.0c). Prints the
+# effective resolution — overlay state, resolved container names, resolved published
+# ports, and per-base compose-file argument sets — without touching any service.
+# When the overlay is active it also validates that every needed overlay file exists
+# and renders (plan 1.17.2), aborting non-zero otherwise (proves U-60).
+cmd_resolve() {
+    echo "overlay_active=${OVERLAY_ACTIVE:-false}"
+    if [ "${OVERLAY_ACTIVE:-false}" = "true" ]; then
+        echo "run_id=${LAKEHOUSE_TEST_RUN_ID}"
+        echo "compose_project=${COMPOSE_PROJECT_NAME:-}"
+        overlay_validate_all_services || exit 1
+    fi
+
+    local c
+    for c in spark-master-41 spark-worker-41 spark-connect-41 kafka zookeeper \
+             unity-catalog airflow-webserver airflow-scheduler airflow-triggerer \
+             mlflow jupyter; do
+        echo "container.${c}=$(resolve_container_name "$c")"
+    done
+
+    # Port arithmetic (base [+ offset]) for reference only. NOTE: the shipped test
+    # overlays use bridge networking and publish NO host ports (plan 1.17.1) — a
+    # test that needs host reachability publishes its own port at this offset. So
+    # these values are the resolver's arithmetic, not live connection targets, and
+    # runtime health probes deliberately use the fixed base ports.
+    echo "ports_published_by_overlays=none"
+    # PostgreSQL and SeaweedFS are host-installed (outside Compose): fixed ports,
+    # never offset. Only containerized services can take a port offset.
+    echo "port.postgresql=5432"
+    echo "port.seaweedfs=8333"
+    echo "port.unity_catalog=$(resolve_port 8081)"
+    echo "port.spark_connect=$(resolve_port 15002)"
+    echo "port.spark_ui=$(resolve_port 8082)"
+    echo "port.spark_worker_ui=$(resolve_port 8083)"
+    echo "port.kafka=$(resolve_port 9092)"
+    echo "port.zookeeper=$(resolve_port 2181)"
+    echo "port.airflow=$(resolve_port 8085)"
+    echo "port.mlflow=$(resolve_port 5000)"
+
+    local svc
+    for svc in spark41 kafka unity-catalog airflow mlflow notebooks; do
+        overlay_set_compose_args "$svc" || exit 1
+        echo "compose.${svc}=${OVERLAY_COMPOSE_ARGS[*]}"
+    done
+}
+
 cmd_help() {
     cat <<'EOF'
 open-lakehouse — demo platform CLI
@@ -1303,6 +2829,12 @@ Commands:
   consumer            Start Spark streaming consumer
   testdata <cmd>      Test data generation (generate|stream|load|stats|clean)
   browsedata [table]  Browse Iceberg table rows (default: iceberg.bronze.orders)
+  reset <mode>        Reset environment: --data | --metadata | --all
+                        [--keep-mlflow] [--dry-run] [--yes]
+  backup [--out <d>]  Back up all databases + object store + volumes + UC state
+  restore --from <p>  Restore from a backup artifact (fail-stop; --yes to skip prompt,
+                        --force to restore a MANIFEST whose targets differ from this stack)
+  doctor              Report orphaned data / catalog inconsistencies
   help                Show this help
 
 Services:
@@ -1347,10 +2879,17 @@ export_spark_env
 # Re-bind positional args to the flag-stripped list so `case $1` sees the command.
 set -- "${ARGS[@]}"
 
+# Overlay activation is ALL-OR-NOTHING (plan 1.17.2): if ANY LAKEHOUSE_* overlay
+# variable is set, all must be present and valid or we abort non-zero — the CLI must
+# never fall back to the real stack. A no-op (returns 0) when no overlay var is set.
+if ! overlay_validate_activation; then
+    exit 1
+fi
+
 # Let `help` and `status` bypass the local-mode guard so users can inspect state
 # without committing to a transport. All other commands enforce connect-only.
 case ${1:-help} in
-    help|status|''|-h|--help) ;;
+    help|status|__resolve|reset|backup|restore|doctor|''|-h|--help) ;;
     *) require_connect_mode ;;
 esac
 
@@ -1373,5 +2912,10 @@ case ${1:-help} in
     consumer)     cmd_consumer ;;
     testdata)     cmd_testdata "${@:2}" ;;
     browsedata)   browse_tables "$2" ;;
+    reset)        cmd_reset "${@:2}" ;;
+    backup)       cmd_backup "${@:2}" ;;
+    restore)      cmd_restore "${@:2}" ;;
+    doctor)       cmd_doctor "${@:2}" ;;
+    __resolve)    cmd_resolve ;;
     help|*)       cmd_help ;;
 esac

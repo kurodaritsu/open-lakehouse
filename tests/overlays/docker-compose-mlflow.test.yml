@@ -1,0 +1,45 @@
+# Test overlay for docker-compose-mlflow.yml — see tests/overlays/README.md.
+services:
+  mlflow:
+    container_name: mlflow-server-${LAKEHOUSE_RESOURCE_SUFFIX}
+    env_file: !override
+      - path: .env
+        required: false
+    network_mode: !reset null
+    networks:
+      - default
+    # Base publishes 5000:5000; drop it — reached in-network.
+    ports: !reset null
+    # Only the run-scoped / bridge overrides are set here; every other env key
+    # (POSTGRES_USER/PASSWORD, MLFLOW_PG_USER/PASS, AWS creds, gateway config)
+    # deep-merges from the base compose file, so no credentials are duplicated
+    # into this overlay.
+    environment:
+      # host-installed PostgreSQL / SeaweedFS live outside Compose (plan 1.10);
+      # reach them via the host-gateway from the bridge network.
+      POSTGRES_HOST: "host.docker.internal"
+      MLFLOW_S3_ENDPOINT_URL: "http://host.docker.internal:8333"
+      # Run-scoped tracking database and artifact bucket.
+      MLFLOW_PG_DB: "ol_test_${LAKEHOUSE_RESOURCE_SUFFIX}_mlflow"
+      MLFLOW_ARTIFACTS_DESTINATION: "s3://ol-test-${LAKEHOUSE_RESOURCE_SUFFIX}/mlflow-artifacts"
+    extra_hosts:
+      - host.docker.internal:host-gateway
+
+  mlflow-agent:
+    container_name: spark-mlflow-agent-${LAKEHOUSE_RESOURCE_SUFFIX}
+    env_file: !override
+      - path: .env
+        required: false
+    network_mode: !reset null
+    networks:
+      - default
+    environment:
+      - MLFLOW_TRACKING_URI=http://mlflow-server-${LAKEHOUSE_RESOURCE_SUFFIX}:5000
+      - SPARK_MASTER=spark://spark-master-41-${LAKEHOUSE_RESOURCE_SUFFIX}:7078
+      - LLM_MODEL=gpt-oss:20b
+      - LLM_PROVIDER=openai
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
+      - PYTHONPATH=/opt/spark/python:/opt/spark/python/lib/py4j-0.10.9.9-src.zip
+      - SPARK_HOME=/opt/spark
+    extra_hosts:
+      - host.docker.internal:host-gateway

@@ -1,0 +1,14 @@
+# Test overlay for docker-compose-unity-catalog.yml — see tests/overlays/README.md.
+# UC STAYS ON EMBEDDED H2 (plan 1.16.4): isolate by container name + network only,
+# never point UC at a test PostgreSQL database — this is what keeps the docker cp
+# H2 backup path (I-29) exercised. Proven by U-58.
+services:
+  unity-catalog:
+    container_name: unity-catalog-${LAKEHOUSE_RESOURCE_SUFFIX}
+    # Base publishes 8081:8080; drop it — the test stack reaches UC in-network.
+    ports: !reset null
+    # Base is already bridge on lakehouse-network; move onto the shared default
+    # network so the whole run-scoped stack can talk. !override replaces the list
+    # rather than merging with the base's [lakehouse-network].
+    networks: !override
+      - default

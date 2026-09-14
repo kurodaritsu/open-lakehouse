@@ -1,0 +1,76 @@
+# Test overlay for docker-compose-spark41.yml — see tests/overlays/README.md.
+# Override-only: run-scopes container names, switches host->bridge, points the
+# worker/connect at the run-scoped master, and isolates S3 to the test bucket.
+services:
+  spark-master-41:
+    container_name: spark-master-41-${LAKEHOUSE_RESOURCE_SUFFIX}
+    env_file: !override
+      - path: .env
+        required: false
+    network_mode: !reset null
+    networks:
+      - default
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    environment:
+      - SPARK_MASTER_PORT=7078
+      - SPARK_MASTER_WEBUI_PORT=8082
+      - S3_BUCKET=ol-test-${LAKEHOUSE_RESOURCE_SUFFIX}
+      - S3_WAREHOUSE=s3a://ol-test-${LAKEHOUSE_RESOURCE_SUFFIX}/warehouse
+      - S3_ENDPOINT=http://host.docker.internal:8333
+      # Run-scope the Iceberg JDBC catalog DB so the overlay never writes the real
+      # iceberg_catalog (matches reset's ol_test_<runid>_iceberg_catalog target).
+      - ICEBERG_CATALOG_URI=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@host.docker.internal:5432/ol_test_${LAKEHOUSE_RESOURCE_SUFFIX}_iceberg_catalog
+
+  spark-worker-41:
+    container_name: spark-worker-41-${LAKEHOUSE_RESOURCE_SUFFIX}
+    env_file: !override
+      - path: .env
+        required: false
+    network_mode: !reset null
+    networks:
+      - default
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    environment:
+      - SPARK_WORKER_WEBUI_PORT=8083
+      - S3_BUCKET=ol-test-${LAKEHOUSE_RESOURCE_SUFFIX}
+      - S3_WAREHOUSE=s3a://ol-test-${LAKEHOUSE_RESOURCE_SUFFIX}/warehouse
+      - S3_ENDPOINT=http://host.docker.internal:8333
+      # Run-scope the Iceberg JDBC catalog DB so the overlay never writes the real
+      # iceberg_catalog (matches reset's ol_test_<runid>_iceberg_catalog target).
+      - ICEBERG_CATALOG_URI=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@host.docker.internal:5432/ol_test_${LAKEHOUSE_RESOURCE_SUFFIX}_iceberg_catalog
+    command: >
+      bash -c "
+        sleep 5 &&
+        /opt/spark/sbin/start-worker.sh spark://spark-master-41-${LAKEHOUSE_RESOURCE_SUFFIX}:7078 --webui-port 8083 &&
+        tail -f /opt/spark/logs/*
+        "
+
+  spark-connect-41:
+    container_name: spark-connect-41-${LAKEHOUSE_RESOURCE_SUFFIX}
+    env_file: !override
+      - path: .env
+        required: false
+    network_mode: !reset null
+    networks:
+      - default
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    environment:
+      - SPARK_NO_DAEMONIZE=1
+      - S3_BUCKET=ol-test-${LAKEHOUSE_RESOURCE_SUFFIX}
+      - S3_WAREHOUSE=s3a://ol-test-${LAKEHOUSE_RESOURCE_SUFFIX}/warehouse
+      - S3_ENDPOINT=http://host.docker.internal:8333
+      # Run-scope the Iceberg JDBC catalog DB so the overlay never writes the real
+      # iceberg_catalog (matches reset's ol_test_<runid>_iceberg_catalog target).
+      - ICEBERG_CATALOG_URI=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@host.docker.internal:5432/ol_test_${LAKEHOUSE_RESOURCE_SUFFIX}_iceberg_catalog
+    command: >
+      bash -c "
+        sleep 10 &&
+        /opt/spark/sbin/start-connect-server.sh
+        --master spark://spark-master-41-${LAKEHOUSE_RESOURCE_SUFFIX}:7078
+        --conf spark.connect.grpc.binding.port=15002
+        --conf spark.connect.grpc.binding.host=0.0.0.0
+        --packages org.apache.spark:spark-connect_2.13:4.1.0
+        "

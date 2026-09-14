@@ -1,0 +1,9 @@
+# Test overlay for docker-compose-notebooks.yml — see tests/overlays/README.md.
+services:
+  jupyter:
+    container_name: jupyter-${LAKEHOUSE_RESOURCE_SUFFIX}
+    network_mode: !reset null
+    networks:
+      - default
+    extra_hosts:
+      - host.docker.internal:host-gateway
