@@ -3,7 +3,9 @@ x-airflow-common:
   build:
     context: .
     dockerfile: docker/airflow/Dockerfile
-  env_file: .env
+  env_file:
+    - path: .env
+      required: false
   environment:
     &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
