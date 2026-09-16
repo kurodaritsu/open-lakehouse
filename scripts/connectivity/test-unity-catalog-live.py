@@ -185,8 +185,7 @@ def test_spark_with_uc(spark):
         # Create table
         print(f"  Creating table: {catalog_name}.{TEST_SCHEMA}.{TEST_TABLE}")
         spark.sql(f"DROP TABLE IF EXISTS {catalog_name}.{TEST_SCHEMA}.{TEST_TABLE}")
-        spark.sql(
-            f"""
+        spark.sql(f"""
             CREATE TABLE {catalog_name}.{TEST_SCHEMA}.{TEST_TABLE} (
                 order_id STRING,
                 customer_id STRING,
@@ -194,19 +193,16 @@ def test_spark_with_uc(spark):
                 amount DOUBLE,
                 order_date DATE
             ) USING iceberg
-        """
-        )
+        """)
 
         # Insert data
         print("  Inserting test data...")
-        spark.sql(
-            f"""
+        spark.sql(f"""
             INSERT INTO {catalog_name}.{TEST_SCHEMA}.{TEST_TABLE} VALUES
             ('UC-001', 'CUST-1', 'Widget', 99.99, DATE '2024-01-15'),
             ('UC-002', 'CUST-2', 'Gadget', 149.99, DATE '2024-01-16'),
             ('UC-003', 'CUST-1', 'Device', 299.99, DATE '2024-01-17')
-        """
-        )
+        """)
 
         # Query data
         print("  Querying data...")
