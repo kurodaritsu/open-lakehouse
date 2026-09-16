@@ -56,22 +56,30 @@ services:
       start_period: 30s
     restart: unless-stopped
     networks:
-      - lakehouse-network
+      lakehouse-network:
+        aliases:
+          - server
 
-  # Optional: Unity Catalog Web UI
-  # Uncomment to enable the graphical interface
-  # unity-catalog-ui:
-  #   image: unitycatalog/unitycatalog-ui:0.4.0
-  #   container_name: unity-catalog-ui
-  #   ports:
-  #     - "3000:3000"
-  #   environment:
-  #     - UC_API_URL=http://unity-catalog:8080
-  #   depends_on:
-  #     unity-catalog:
-  #       condition: service_healthy
-  #   networks:
-  #     - lakehouse-network
+  # Unity Catalog Web UI (http://localhost:3000). The image's CRA dev server
+  # proxies /api to the hardcoded hostname `server:8080`, so the UC container
+  # carries a `server` alias on the bridge network; UC_API_URL is not read.
+  # No versioned tag exists on Docker Hub (only main / main-<sha>); pinned to a sha.
+  unity-catalog-ui:
+    image: unitycatalog/unitycatalog-ui:main-aadc6fc
+    container_name: unity-catalog-ui
+    ports:
+      - "3000:3000"
+    environment:
+      # CRA dev server: eslint tries to write node_modules/.cache, which fails
+      # under rootless podman with userns=keep-id (image files are root-owned).
+      # Lint is irrelevant for a prebuilt UI, so skip the plugin.
+      - DISABLE_ESLINT_PLUGIN=true
+    depends_on:
+      unity-catalog:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - lakehouse-network
 
 volumes:
   uc-data:

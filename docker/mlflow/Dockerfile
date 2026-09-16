@@ -11,7 +11,10 @@ FROM ghcr.io/mlflow/mlflow:v3.13.0-full
 
 USER root
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# bullseye-security's pool no longer serves the postgresql-13 debs (404 as of
+# 2026-09); main still does, so drop the security source for this one install.
+RUN sed -i '/bullseye-security/d' /etc/apt/sources.list \
+    && apt-get update && apt-get install -y --no-install-recommends \
       postgresql-client \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*

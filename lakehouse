@@ -48,6 +48,11 @@ check_gnutools_on_macos() {
 	fi
 }
 
+# TCP port probe on localhost via bash /dev/tcp — no netcat dependency.
+port_open() {
+    timeout 2 bash -c ">/dev/tcp/localhost/$1" 2>/dev/null
+}
+
 # Check if a command exists
 check_cmd() {
     command -v "$1" >/dev/null 2>&1
@@ -61,47 +66,30 @@ browse_tables() {
     docker exec -it "$master" sh -c "/opt/spark/bin/spark-sql -e \"select * from ${table} limit 10;\""
 }
 
-# Setup PostgreSQL database (create if not exists)
+# Setup PostgreSQL database (create if not exists). Goes through pg_psql so it
+# works with or without a host psql (falls back to a dockerized client).
 setup_postgres() {
-    local pg_user="${POSTGRES_USER:-postgres}"
-    local pg_pass="${POSTGRES_PASSWORD:-}"
-    local pg_host="${POSTGRES_HOST:-localhost}"
-    pg_host="${pg_host/host.docker.internal/localhost}"
-    local pg_port="${POSTGRES_PORT:-5432}"
     local db_name="iceberg_catalog"
 
     echo -e "${YELLOW}Checking PostgreSQL database...${NC}"
 
-    # Check if PostgreSQL is reachable
-    if ! nc -z "$pg_host" "$pg_port" 2>/dev/null; then
-        echo -e "   ${RED}✗${NC} PostgreSQL not reachable on $pg_host:$pg_port"
-        echo -e "   ${YELLOW}→ Ensure PostgreSQL is running${NC}"
+    if ! pg_psql -d postgres -c "SELECT 1;" >/dev/null 2>&1; then
+        echo -e "   ${RED}✗${NC} PostgreSQL not reachable on ${POSTGRES_HOST:-localhost}:${POSTGRES_PORT:-5432}"
+        echo -e "   ${YELLOW}→ Run: ./lakehouse start infra${NC}"
         return 1
     fi
 
-    # Check if psql is available
-    if ! check_cmd psql; then
-        echo -e "   ${YELLOW}!${NC} psql not installed - cannot auto-create database"
-        echo -e "   ${YELLOW}→ Manually create database: createdb $db_name${NC}"
-        return 0
-    fi
-
-    # Check if database exists
-    if PGPASSWORD="$pg_pass" psql -h "$pg_host" -p "$pg_port" -U "$pg_user" -d "$db_name" -c "SELECT 1;" >/dev/null 2>&1; then
+    if pg_psql -d "$db_name" -c "SELECT 1;" >/dev/null 2>&1; then
         echo -e "   ${GREEN}✓${NC} Database '$db_name' exists"
         return 0
     fi
 
-    # Database doesn't exist - attempt to create it
     echo -e "   ${YELLOW}!${NC} Database '$db_name' not found"
-
-    # Try to connect to postgres default database to create iceberg_catalog
-    if PGPASSWORD="$pg_pass" psql -h "$pg_host" -p "$pg_port" -U "$pg_user" -d postgres -c "CREATE DATABASE $db_name;" 2>/dev/null; then
+    if pg_psql -d postgres -c "CREATE DATABASE $db_name;" >/dev/null 2>&1; then
         echo -e "   ${GREEN}✓${NC} Created database '$db_name'"
         return 0
     else
         echo -e "   ${RED}✗${NC} Failed to create database '$db_name'"
-        echo -e "   ${YELLOW}→ Create manually: createdb -h $pg_host -U $pg_user $db_name${NC}"
         return 1
     fi
 }
@@ -193,7 +181,7 @@ preflight_checks() {
         for port_info in "${ports_to_check[@]}"; do
             local port="${port_info%%:*}"
             local name="${port_info#*:}"
-            if nc -z localhost "$port" 2>/dev/null; then
+            if port_open "$port"; then
                 # Port in use - check if it's our expected service
                 case $port in
                     "$spark_port"|"$spark_ui_port")
@@ -239,7 +227,6 @@ check_prerequisites() {
     fi
 
     # Optional but recommended
-    check_cmd nc || warnings+=("nc (netcat) - needed for port checks")
     check_cmd psql || warnings+=("psql - needed for PostgreSQL tests")
 
     # Check Java version for Spark
@@ -320,15 +307,15 @@ wait_for_services() {
 
     # Kafka/Zookeeper (if started)
     if docker ps --format '{{.Names}}' | grep -q "^${zk_ct}$"; then
-        wait_for_service "Zookeeper" "nc -z localhost 2181" 30
+        wait_for_service "Zookeeper" "port_open 2181" 30
     fi
     if docker ps --format '{{.Names}}' | grep -q "^${kafka_ct}$"; then
-        wait_for_service "Kafka" "nc -z localhost 9092" 30
+        wait_for_service "Kafka" "port_open 9092" 30
     fi
 
     # Spark (if started)
     if docker ps --format '{{.Names}}' | grep -q "^${master_container}$"; then
-        wait_for_service "Spark Master" "nc -z localhost $spark_port" 30
+        wait_for_service "Spark Master" "port_open $spark_port" 30
         wait_for_service "Spark UI" "curl -s http://localhost:$(get_spark_ui_port) >/dev/null" 30
     fi
 }
@@ -392,8 +379,8 @@ check_service() {
     local service=$1
     local port=$2
     local name=$3
-    
-    if nc -z localhost $port 2>/dev/null; then
+
+    if port_open $port; then
         echo -e "${GREEN}✓${NC} $name (port $port)"
         return 0
     else
@@ -417,7 +404,7 @@ check_container() {
 # Check if service is healthy (silent, returns 0/1)
 is_service_healthy() {
     local port=$1
-    nc -z localhost "$port" 2>/dev/null
+    port_open "$port"
 }
 
 # Check Airflow health via API
@@ -537,6 +524,7 @@ cmd_status_human() {
     echo "  MLflow:           5000 (Tracking), 5001 (AI Gateway)"
 
     echo -e "\n${YELLOW}Configurations:${NC}"
+    echo "  Infra:           docker-compose-infra.yml"
     echo "  Spark:           docker-compose-spark41.yml"
     echo "  Kafka:           docker-compose-kafka.yml"
     echo "  Unity Catalog:   docker-compose-unity-catalog.yml"
@@ -560,7 +548,7 @@ check_port_available() {
     local port=$1
     local expected_container=$2
 
-    if ! nc -z localhost "$port" 2>/dev/null; then
+    if ! port_open "$port"; then
         # Port is free
         return 0
     fi
@@ -624,7 +612,7 @@ check_ports_for_service() {
     esac
 
     case $service in
-        kafka|all)
+        kafka)
             if ! check_port_available 9092 "$(resolve_container_name kafka)"; then
                 echo -e "  ${RED}✗${NC} Port 9092 (Kafka) blocked by another process"
                 has_conflicts=1
@@ -668,6 +656,8 @@ cmd_start() {
 
     local service=$1
     local spark_port=$(get_spark_port)
+    local master_container
+    master_container=$(resolve_container_name "$(get_spark_master_container)")
 
     # Check port availability before starting
     if ! check_ports_for_service "$service"; then
@@ -677,17 +667,34 @@ cmd_start() {
     echo ""
 
     case $service in
+        infra|all)
+            echo -e "${YELLOW}Starting infra (PostgreSQL 18 on 5432, SeaweedFS S3 on 8333)...${NC}"
+            overlay_set_compose_args infra || return 1
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d
+            # pg_isready inside the container: no host-side nc/psql dependency.
+            wait_for_service "PostgreSQL" "docker exec $(resolve_container_name lakehouse-postgres) pg_isready -q -h localhost" 60
+            wait_for_service "SeaweedFS S3" "curl -s http://localhost:8333/status >/dev/null" 60
+            # s3a never creates buckets; make the warehouse bucket exist (idempotent).
+            docker exec "$(resolve_container_name lakehouse-seaweedfs)" \
+                sh -c "echo 's3.bucket.create -name ${S3_BUCKET:-lakehouse}' | weed shell" >/dev/null 2>&1 || true
+            ;;
+    esac
+
+    case $service in
         spark|all)
             echo -e "${YELLOW}Starting Spark 4.1 (port $spark_port, Connect on $(get_spark_connect_port))...${NC}"
             overlay_set_compose_args spark41 || return 1
             docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d
-            wait_for_service "Spark Connect" "nc -z localhost $(get_spark_connect_port)" 90
+            # Event-log dir on the shared volume. The compose post_start hook does this
+            # under Docker, but podman-compose ignores lifecycle hooks; idempotent here.
+            docker exec "$master_container" mkdir -p /opt/spark-data/logs 2>/dev/null || true
+            wait_for_service "Spark Connect" "port_open $(get_spark_connect_port)" 90
             echo -e "${GREEN}Spark Connect endpoint:${NC} $(get_spark_remote)"
             ;;
     esac
 
     case $service in
-        kafka|all)
+        kafka)
             echo -e "${YELLOW}Starting Kafka...${NC}"
             overlay_set_compose_args kafka || return 1
             docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d
@@ -731,10 +738,10 @@ cmd_start() {
     esac
 
     case $service in
-        spark|kafka|all|unity-catalog|uc|airflow|mlflow)
+        infra|spark|kafka|all|unity-catalog|uc|airflow|mlflow)
             ;;
         *)
-            echo "Usage: lakehouse start [spark|kafka|airflow|unity-catalog|mlflow|all]"
+            echo "Usage: lakehouse start [infra|spark|kafka|airflow|unity-catalog|mlflow|all]"
             exit 1
             ;;
     esac
@@ -761,7 +768,7 @@ cmd_stop() {
     esac
 
     case $service in
-        kafka|all)
+        kafka)
             echo -e "${YELLOW}Stopping Kafka...${NC}"
             overlay_set_compose_args kafka || return 1
             docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down
@@ -793,10 +800,18 @@ cmd_stop() {
     esac
 
     case $service in
-        spark|kafka|all|unity-catalog|uc|airflow|mlflow)
+        infra|all)
+            echo -e "${YELLOW}Stopping infra (PostgreSQL + SeaweedFS; volumes preserved)...${NC}"
+            overlay_set_compose_args infra || return 1
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down
+            ;;
+    esac
+
+    case $service in
+        infra|spark|kafka|all|unity-catalog|uc|airflow|mlflow)
             ;;
         *)
-            echo "Usage: lakehouse stop [spark|kafka|airflow|unity-catalog|mlflow|all]"
+            echo "Usage: lakehouse stop [infra|spark|kafka|airflow|unity-catalog|mlflow|all]"
             exit 1
             ;;
     esac
@@ -821,6 +836,8 @@ cmd_logs() {
             echo -e "${YELLOW}Logs for $(resolve_container_name spark-connect-41):${NC}"
             docker logs -f "$(resolve_container_name spark-connect-41)"
             ;;
+        postgres)         docker logs -f "$(resolve_container_name lakehouse-postgres)" ;;
+        seaweedfs)        docker logs -f "$(resolve_container_name lakehouse-seaweedfs)" ;;
         kafka)            docker logs -f "$(resolve_container_name kafka)" ;;
         zookeeper)        docker logs -f "$(resolve_container_name zookeeper)" ;;
         unity-catalog|uc) docker logs -f "$(resolve_container_name unity-catalog)" ;;
@@ -829,7 +846,7 @@ cmd_logs() {
         airflow-scheduler|airflow-sched)  docker logs -f "$(resolve_container_name airflow-scheduler)" ;;
         airflow-triggerer)                docker logs -f "$(resolve_container_name airflow-triggerer)" ;;
         *)
-            echo "Usage: lakehouse logs [spark-master|spark-worker|spark-connect|kafka|zookeeper|unity-catalog|mlflow|airflow-webserver|airflow-scheduler|airflow-triggerer]"
+            echo "Usage: lakehouse logs [postgres|seaweedfs|spark-master|spark-worker|spark-connect|kafka|zookeeper|unity-catalog|mlflow|airflow-webserver|airflow-scheduler|airflow-triggerer]"
             exit 1
             ;;
     esac
@@ -856,11 +873,11 @@ cmd_test() {
     local pg_pass="${POSTGRES_PASSWORD:-}"
     local pg_host="${POSTGRES_HOST:-localhost}"
     pg_host="${pg_host/host.docker.internal/localhost}"  # Convert Docker hostname to localhost
-    if PGPASSWORD="$pg_pass" psql -h "$pg_host" -U "$pg_user" -d iceberg_catalog -c "SELECT 1;" >/dev/null 2>&1; then
+    if pg_psql -d iceberg_catalog -c "SELECT 1;" >/dev/null 2>&1; then
         echo -e "   ${GREEN}✓${NC} PostgreSQL connected"
     else
         echo -e "   ${RED}✗${NC} PostgreSQL failed"
-        echo -e "   ${YELLOW}→ Check: systemctl status postgresql${NC}"
+        echo -e "   ${YELLOW}→ Check: ./lakehouse start infra && ./lakehouse setup${NC}"
         echo -e "   ${YELLOW}→ Verify POSTGRES_USER in .env matches your database user${NC}"
         ((failures++))
     fi
@@ -884,9 +901,7 @@ cmd_test() {
             ((failures++))
         fi
     else
-        echo -e "   ${RED}✗${NC} Kafka container not running"
-        echo -e "   ${YELLOW}→ Run: ./lakehouse start kafka${NC}"
-        ((failures++))
+        echo -e "   ${YELLOW}!${NC} Kafka not started (optional: ./lakehouse start kafka)"
     fi
 
     echo -e "\n${YELLOW}4. Testing Spark 4.1...${NC}"
@@ -905,7 +920,7 @@ cmd_test() {
     fi
 
     echo -e "\n${YELLOW}4b. Testing Spark Connect gRPC...${NC}"
-    if nc -z localhost "$(get_spark_connect_port)" 2>/dev/null; then
+    if port_open "$(get_spark_connect_port)"; then
         echo -e "   ${GREEN}✓${NC} Spark Connect listening on $(get_spark_remote)"
     else
         echo -e "   ${RED}✗${NC} Spark Connect not reachable on port $(get_spark_connect_port)"
@@ -1200,7 +1215,7 @@ cmd_setup() {
 
     # Step 1.1: Check for GNU tools, when on MacOS
 	if [ -f /usr/bin/sw_vers ]
-	then	
+	then
 		echo -e "\n${YELLOW}1.1. Checking for GNU tools when on MacOS...${NC}"
 		if ! check_gnutools_on_macos; then
 			echo -e "\n${RED}Please install GNU tools on MacOS before continuing.${NC}"
@@ -1309,10 +1324,10 @@ cmd_setup() {
 
     # Step 6: Setup PostgreSQL database
     echo -e "\n${YELLOW}5. Setting up PostgreSQL database...${NC}"
-    if check_cmd psql && [ -n "$POSTGRES_USER" ] && [ "$POSTGRES_USER" != "your_username" ]; then
+    if [ -n "$POSTGRES_USER" ] && [ "$POSTGRES_USER" != "your_username" ]; then
         setup_postgres || has_errors=1
     else
-        echo -e "   ${YELLOW}!${NC} Skipping PostgreSQL setup (psql not available or credentials not configured)"
+        echo -e "   ${YELLOW}!${NC} Skipping PostgreSQL setup (credentials not configured)"
     fi
 
     # Step 7: Check disk space
@@ -1327,7 +1342,7 @@ cmd_setup() {
     # Step 8: Check for port conflicts
     echo -e "\n${YELLOW}7. Checking for port conflicts...${NC}"
     for port in 5432 8333 9092 2181 7078 8081 8082 8085 5000 5001; do
-        if nc -z localhost $port 2>/dev/null; then
+        if port_open $port; then
             case $port in
                 5432) echo -e "  ${GREEN}✓${NC} Port $port in use (PostgreSQL expected)" ;;
                 8333) echo -e "  ${GREEN}✓${NC} Port $port in use (SeaweedFS expected)" ;;
@@ -1415,6 +1430,9 @@ reset_volume_mode() {
         mlflow-data)           echo "metadata,all" ;;  # tracking state (kept by --keep-mlflow)
         uc-data)               echo "metadata,all" ;;  # catalog state (if ever mounted)
         uc-logs)               echo "never" ;;         # diagnostics — never destroyed
+        # Infra backing stores. Reset already drops/recreates the databases and
+        # empties the bucket through Postgres/S3; the volumes themselves stay.
+        pg-data|seaweed-data)  echo "never" ;;
         spark-data|spark-logs) echo "data,all" ;;      # job scratch + event logs
         *)                     echo "data,all" ;;      # default: data-plane scratch
     esac
@@ -2797,7 +2815,7 @@ cmd_resolve() {
     echo "port.mlflow=$(resolve_port 5000)"
 
     local svc
-    for svc in spark41 kafka unity-catalog airflow mlflow notebooks; do
+    for svc in infra spark41 kafka unity-catalog airflow mlflow notebooks; do
         overlay_set_compose_args "$svc" || exit 1
         echo "compose.${svc}=${OVERLAY_COMPOSE_ARGS[*]}"
     done
@@ -2819,10 +2837,10 @@ Commands:
   preflight           Run preflight checks before starting services
   migrate [--dry-run] Run database schema migrations
   status [--json]     Show all service status (human or JSON)
-  start [service]     Start service (spark|kafka|airflow|unity-catalog|mlflow|all)
-  stop [service]      Stop service (spark|kafka|airflow|unity-catalog|mlflow|all)
+  start [service]     Start service (infra|spark|kafka|airflow|unity-catalog|mlflow|all)
+  stop [service]      Stop service (infra|spark|kafka|airflow|unity-catalog|mlflow|all)
   restart [service]   Restart service
-  logs [service]      Tail logs (spark-master|spark-worker|kafka|zookeeper|
+  logs [service]      Tail logs (postgres|seaweedfs|spark-master|spark-worker|kafka|zookeeper|
                                   unity-catalog|mlflow|airflow-*)
   test                Run connectivity tests
   producer            Start Kafka event producer
@@ -2838,12 +2856,13 @@ Commands:
   help                Show this help
 
 Services:
+  infra          PostgreSQL 18 (5432) + SeaweedFS 4.47 S3 gateway (8333)
   spark          Apache Spark 4.1 cluster (ports 7078, UI 8082)
   kafka          Kafka 3.6 + Zookeeper
   airflow        Apache Airflow 3.1 (UI 8085)
   unity-catalog  Unity Catalog OSS 0.4.x (REST API 8081)
   mlflow         MLflow 3.1 (tracking 5000, AI gateway 5001)
-  all            Spark + Kafka (start unity-catalog, airflow, mlflow individually)
+  all            Infra + Spark (start kafka, unity-catalog, airflow, mlflow individually)
 
 Catalog: Unity Catalog OSS only. No JDBC-catalog mode. UC provides:
   - Iceberg + Delta + Hudi via UniForm

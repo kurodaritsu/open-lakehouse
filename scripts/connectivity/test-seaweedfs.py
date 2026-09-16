@@ -98,7 +98,8 @@ def test_iceberg_write(spark):
         spark.sql("DROP TABLE IF EXISTS iceberg.test_storage.s3_test")
 
         # Create table with explicit location
-        spark.sql("""
+        spark.sql(
+            """
             CREATE TABLE iceberg.test_storage.s3_test (
                 id INT,
                 product STRING,
@@ -107,18 +108,21 @@ def test_iceberg_write(spark):
                 created_at TIMESTAMP
             ) USING iceberg
             PARTITIONED BY (days(created_at))
-        """)
+        """
+        )
         print("  Created table: iceberg.test_storage.s3_test")
 
         # Insert test data
-        spark.sql("""
+        spark.sql(
+            """
             INSERT INTO iceberg.test_storage.s3_test VALUES
             (1, 'Widget A', 29.99, 10, timestamp '2024-01-15 10:30:00'),
             (2, 'Widget B', 49.99, 5, timestamp '2024-01-15 11:45:00'),
             (3, 'Gadget X', 99.99, 3, timestamp '2024-01-16 09:00:00'),
             (4, 'Gadget Y', 149.99, 2, timestamp '2024-01-16 14:30:00'),
             (5, 'Device Z', 199.99, 1, timestamp '2024-01-17 16:00:00')
-        """)
+        """
+        )
         print("  Inserted 5 test records")
 
         # Verify data

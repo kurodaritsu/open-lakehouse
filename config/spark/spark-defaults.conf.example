@@ -45,6 +45,11 @@ spark.hadoop.fs.s3a.secret.key            your_secret_key
 spark.hadoop.fs.s3a.path.style.access     true
 spark.hadoop.fs.s3a.impl                  org.apache.hadoop.fs.s3a.S3AFileSystem
 spark.hadoop.fs.s3a.connection.ssl.enabled false
+# UC credential vending hands Spark the static keys plus the placeholder
+# s3.sessionToken.0 from server.properties. SeaweedFS 4.x validates any session
+# token as an STS token and 403s on the placeholder, so skip the Temporary
+# provider and sign with access/secret only.
+spark.hadoop.fs.s3a.aws.credentials.provider org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider
 # SeaweedFS S3 returns HTTP 500 on bulk DeleteObjects and on the Hadoop
 # FileOutputCommitter's directory-marker cleanup. Delete one object at a time
 # and keep directory markers so recursive deletes / commits don't fail.

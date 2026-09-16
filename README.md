@@ -63,7 +63,8 @@ cd open-lakehouse
 
 cp .env.example .env       # fill in POSTGRES_*, S3_* placeholders
 ./lakehouse setup          # validate env, install deps, download ~860MB of JARs
-./lakehouse start all      # Spark 4.1 master + worker + Connect server + Kafka
+./lakehouse start all      # PostgreSQL 18 + SeaweedFS (S3) + Spark 4.1 master + worker + Connect
+./lakehouse start kafka    # optional, only for the streaming demos
 ./lakehouse start unity-catalog
 ./lakehouse start mlflow
 ./lakehouse status --json  # confirm healthy (incl. spark.connect_grpc_listening)
@@ -102,7 +103,7 @@ Full teardown including data: see [`.claude/skills/lakehouse-lifecycle/stop.md`]
 ```
 open-lakehouse/
 ├── lakehouse                       Top-level CLI (start/stop/status/test/migrate)
-├── docker-compose-*.yml            One compose file per service (Spark + Connect, Kafka, UC, MLflow, Airflow, Notebooks)
+├── docker-compose-*.yml            One compose file per service (Infra = Postgres + SeaweedFS, Spark + Connect, Kafka, UC, MLflow, Airflow, Notebooks)
 ├── config/                         Spark, Unity Catalog, MLflow, Airflow configs (examples only — live configs are gitignored)
 ├── demos/                          Four demo slots (see below)
 ├── docs/                           Human-facing documentation
