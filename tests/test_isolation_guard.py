@@ -446,10 +446,10 @@ class TestPerBaseOverlays:
             ), f"UC overlay must not point UC at PostgreSQL (found {pg_marker!r})"
 
     def test_u64_overlay_bridge_base_networking_unchanged(self):
-        # Base networking must be exactly what `main` ships. We read the base file
-        # text directly (base-only `config` can't render the env_file-bearing bases
-        # without a .env), asserting host-mode bases still declare host networking
-        # and UC declares none — proving the overlay changed no base file.
+        # Base networking must be exactly what `main` ships. We assert on the base
+        # file's own text — not a rendered/overlaid merge — since that is what proves
+        # the overlay changed no base file: host-mode bases still declare host
+        # networking and UC declares none.
         for svc in BASE_SERVICES:
             base_text = (REPO_ROOT / f"docker-compose-{svc}.yml").read_text()
             has_host = (
