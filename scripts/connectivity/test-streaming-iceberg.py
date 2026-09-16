@@ -135,8 +135,7 @@ def setup_iceberg_table(spark):
     spark.sql("CREATE NAMESPACE IF NOT EXISTS iceberg.test_streaming")
     spark.sql("DROP TABLE IF EXISTS iceberg.test_streaming.orders")
 
-    spark.sql(
-        """
+    spark.sql("""
         CREATE TABLE iceberg.test_streaming.orders (
             event_id STRING,
             event_type STRING,
@@ -151,8 +150,7 @@ def setup_iceberg_table(spark):
             processing_time TIMESTAMP
         ) USING iceberg
         PARTITIONED BY (hours(event_timestamp))
-    """
-    )
+    """)
     print("Created table: iceberg.test_streaming.orders")
 
 
@@ -287,14 +285,12 @@ def verify_streaming_results(spark):
 
         # Check data quality
         print("\n  Sample records:")
-        spark.sql(
-            """
+        spark.sql("""
             SELECT order_id, product_name, total, event_timestamp
             FROM iceberg.test_streaming.orders
             ORDER BY event_timestamp DESC
             LIMIT 5
-        """
-        ).show(truncate=False)
+        """).show(truncate=False)
 
         # Check partitions
         print("\n  Partitions created:")

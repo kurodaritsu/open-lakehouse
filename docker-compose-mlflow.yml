@@ -59,7 +59,9 @@ services:
     image: apache/spark:4.1.0-scala2.13-java21-python3-r-ubuntu
     container_name: spark-mlflow-agent
     user: root
-    env_file: .env
+    env_file:
+      - path: .env
+        required: false
     networks:
       - lakehouse-network
     # Ollama runs on the HOST (not a Compose service), so this sidecar reaches it

@@ -7,7 +7,9 @@ x-airflow-common:
       PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
       PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-}
       SPARK_DIST_URL: ${SPARK_DIST_URL:-https://archive.apache.org/dist/spark/spark-4.1.0/spark-4.1.0-bin-hadoop3.tgz}
-  env_file: .env
+  env_file:
+    - path: .env
+      required: false
   environment:
     &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
