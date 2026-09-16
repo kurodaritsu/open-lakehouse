@@ -108,6 +108,7 @@ tmp/
 
 # Airflow
 logs/airflow/
+config/airflow/simple_auth_manager_passwords.json
 dags/__pycache__/
 
 # Docker

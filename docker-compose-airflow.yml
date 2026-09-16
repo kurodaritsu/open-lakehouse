@@ -1,5 +1,7 @@
 x-airflow-common:
   &airflow-common
+  # Single image name so compose builds once instead of once per service.
+  image: open-lakehouse/airflow:3.1.6
   build:
     context: .
     dockerfile: docker/airflow/Dockerfile
@@ -13,7 +15,11 @@ x-airflow-common:
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     # Airflow 3.x uses API server instead of webserver
     AIRFLOW__API__PORT: 8085
-    AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+    # Airflow 3 default auth is SimpleAuthManager: users are `name:role`, and
+    # passwords come from a JSON file that airflow-init writes (shared via the
+    # ./config/airflow mount). No `airflow users` CLI exists anymore.
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: "${AIRFLOW_ADMIN_USER:-admin}:admin"
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE: /opt/airflow/config/simple_auth_manager_passwords.json
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
     # Spark connection settings
     SPARK_MASTER_40: spark://localhost:7077
@@ -32,13 +38,14 @@ x-airflow-common:
     - ./jars:/opt/airflow/jars
     - ./data:/opt/airflow/data
   network_mode: "host"
-  depends_on:
-    airflow-init:
-      condition: service_completed_successfully
+  # Rootless podman: map the host user to the image's airflow uid so the bind
+  # mounts (dags, logs, config) are writable from inside the container.
+  userns_mode: "keep-id:uid=50000,gid=0"
 
 services:
   airflow-init:
     <<: *airflow-common
+    container_name: airflow-init
     entrypoint: /bin/bash
     command:
       - -c
@@ -50,20 +57,15 @@ services:
         # Initialize Airflow database
         airflow db migrate
 
-        # Create admin user if it doesn't exist
-        airflow users list | grep -q "${AIRFLOW_ADMIN_USER:-admin}" || \
-        airflow users create \
-          --username ${AIRFLOW_ADMIN_USER:-admin} \
-          --password ${AIRFLOW_ADMIN_PASSWORD:-admin} \
-          --firstname Admin \
-          --lastname User \
-          --role Admin \
-          --email admin@localhost
+        # Set admin password for SimpleAuthManager
+        printf '{"%s": "%s"}\n' "${AIRFLOW_ADMIN_USER:-admin}" "${AIRFLOW_ADMIN_PASSWORD:-admin}" \
+          > "$$AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_PASSWORDS_FILE"
 
         echo "Airflow initialization complete"
-    environment:
-      <<: *airflow-common-env
-    depends_on: []
+    # Not started by `up`; ./lakehouse runs it with `compose run --rm` first
+    # (podman won't let a depends_on target be removed, so no exited container
+    # would otherwise linger).
+    profiles: ["init"]
     restart: "no"
 
   airflow-webserver:
@@ -84,6 +86,20 @@ services:
     command: scheduler
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8974/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # Airflow 3 moved DAG parsing out of the scheduler; without this nothing in
+  # ./dags ever loads.
+  airflow-dag-processor:
+    <<: *airflow-common
+    container_name: airflow-dag-processor
+    command: dag-processor
+    healthcheck:
+      test: ["CMD-SHELL", 'airflow jobs check --job-type DagProcessorJob --hostname "$${HOSTNAME}"']
       interval: 30s
       timeout: 10s
       retries: 5
