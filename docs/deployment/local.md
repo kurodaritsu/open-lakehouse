@@ -34,7 +34,7 @@ This guide covers running the lakehouse stack on your local machine for developm
 See [Installation Guide](../getting-started/installation.md) for setup.
 
 Required:
-- Docker & Docker Compose v2
+- Docker & Docker Compose 2.24+
 - PostgreSQL 16 (running natively)
 - SeaweedFS (running natively)
 - Python 3.10+ with Poetry
