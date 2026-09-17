@@ -109,16 +109,23 @@ class TestReadOnlyReachable:
     def test_catalog_reads_real_uc(self):
         status, data = _get_json("/api/uc/catalogs")
         assert status == 200, f"uc/catalogs status {status}"
-        assert isinstance(data.get("catalogs"), list) and data["catalogs"], (
-            "expected at least one Unity Catalog catalog"
-        )
+        assert (
+            isinstance(data.get("catalogs"), list) and data["catalogs"]
+        ), "expected at least one Unity Catalog catalog"
 
     def test_all_health_endpoints_wellformed(self):
         """Every service surfaced on the home page has a health probe that returns
         a well-formed status (healthy when up, unhealthy/unknown when down) — so
         the dashboard reflects the whole stack, not just the 4 data services."""
         allowed = {"healthy", "unhealthy", "unknown", "unconfigured"}
-        for svc in ["storage", "mlflow", "spark", "airflow", "ai-gateway", "delta-sharing"]:
+        for svc in [
+            "storage",
+            "mlflow",
+            "spark",
+            "airflow",
+            "ai-gateway",
+            "delta-sharing",
+        ]:
             _, data = _get_json(f"/api/health/{svc}")
             assert data and data.get("status") in allowed, f"/api/health/{svc}: {data}"
 
@@ -133,19 +140,27 @@ class TestCodeExecutionGate:
         hit directly over HTTP, with no browser or nav involved."""
         enabled = _code_execution_enabled()
         for method, path in GATED_ROUTES:
-            code = _request(method, path, body={} if method in ("POST", "DELETE") else None)
+            code = _request(
+                method, path, body={} if method in ("POST", "DELETE") else None
+            )
             if enabled:
                 assert code != 403, f"{method} {path} was 403 with the flag ON"
             else:
-                assert code == 403, f"{method} {path} returned {code}, expected 403 with the flag OFF"
+                assert (
+                    code == 403
+                ), f"{method} {path} returned {code}, expected 403 with the flag OFF"
 
     def test_disabled_by_default_returns_403(self):
         """The security-critical default: with the flag off, the whole
         code-execution surface is dead over the wire (403), not just UI-hidden."""
         if _code_execution_enabled():
-            pytest.skip("dashboard started with code-execution ENABLED; run with the default to assert the off posture")
+            pytest.skip(
+                "dashboard started with code-execution ENABLED; run with the default to assert the off posture"
+            )
         for method, path in GATED_ROUTES:
-            code = _request(method, path, body={} if method in ("POST", "DELETE") else None)
+            code = _request(
+                method, path, body={} if method in ("POST", "DELETE") else None
+            )
             assert code == 403, f"{method} {path} returned {code}, expected 403"
 
 

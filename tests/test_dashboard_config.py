@@ -54,15 +54,22 @@ def _compose_env_keys() -> set[str]:
 
 
 def test_compose_exists_and_binds_loopback_3000():
-    assert COMPOSE.is_file(), "docker-compose-dashboard.yml must exist (separate optional service)"
+    assert (
+        COMPOSE.is_file()
+    ), "docker-compose-dashboard.yml must exist (separate optional service)"
     text = _read(COMPOSE)
-    assert '"127.0.0.1:3000:3000"' in text, "dashboard must publish only on loopback:3000"
+    assert (
+        '"127.0.0.1:3000:3000"' in text
+    ), "dashboard must publish only on loopback:3000"
 
 
 def test_code_execution_off_by_default():
     """U-26 / D6: the flag defaults to false in compose, and every exec/write
     route is gated behind codeExecutionEnabled()."""
-    assert "DASHBOARD_ALLOW_CODE_EXECUTION: ${DASHBOARD_ALLOW_CODE_EXECUTION:-false}" in _read(COMPOSE)
+    assert (
+        "DASHBOARD_ALLOW_CODE_EXECUTION: ${DASHBOARD_ALLOW_CODE_EXECUTION:-false}"
+        in _read(COMPOSE)
+    )
 
     gated = [
         "src/app/api/jupyter-exec/route.ts",
@@ -73,8 +80,12 @@ def test_code_execution_off_by_default():
     ]
     for rel in gated:
         src = _read(DASHBOARD / rel)
-        assert "codeExecutionEnabled()" in src, f"{rel} must gate on codeExecutionEnabled()"
-        assert "codeExecutionDisabledResponse()" in src, f"{rel} must return the disabled response"
+        assert (
+            "codeExecutionEnabled()" in src
+        ), f"{rel} must gate on codeExecutionEnabled()"
+        assert (
+            "codeExecutionDisabledResponse()" in src
+        ), f"{rel} must return the disabled response"
 
 
 def test_env_var_contract():
@@ -90,8 +101,12 @@ def test_env_var_contract():
         read_vars.update(re.findall(r'requireEnv\(["\']([A-Z0-9_]+)["\']\)', text))
 
     # NEXT_PUBLIC_* are inlined at build time by Next and need no compose entry.
-    missing = {v for v in read_vars if v not in allowed and not v.startswith("NEXT_PUBLIC_")}
-    assert not missing, f"env vars read in code but not in compose/runtime: {sorted(missing)}"
+    missing = {
+        v for v in read_vars if v not in allowed and not v.startswith("NEXT_PUBLIC_")
+    }
+    assert (
+        not missing
+    ), f"env vars read in code but not in compose/runtime: {sorted(missing)}"
 
 
 def test_not_started_by_start_all():
@@ -100,7 +115,9 @@ def test_not_started_by_start_all():
     never a `...|all)` behavior arm — so `start all` / `stop all` never touch it.
     (The valid-arg allowlist and usage strings may still name it alongside all.)"""
     lines = _read(CLI).splitlines()
-    actions = [i for i, ln in enumerate(lines) if "overlay_set_compose_args dashboard" in ln]
+    actions = [
+        i for i, ln in enumerate(lines) if "overlay_set_compose_args dashboard" in ln
+    ]
     assert actions, "expected at least one dashboard compose action in the CLI"
     for i in actions:
         label = None
