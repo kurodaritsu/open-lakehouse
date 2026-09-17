@@ -757,6 +757,17 @@ cmd_start() {
     local service=$1
     local spark_port=$(get_spark_port)
 
+    # A missing .env makes Compose interpolate blank credentials (POSTGRES_USER,
+    # S3 keys, ...) and services then fail obscurely deep in startup. Since
+    # env_file is `required: false` (so `docker compose config` renders without a
+    # .env), guard it here instead: fail fast with a clear pointer to setup.
+    # LAKEHOUSE_ENV_FILE (test overlays) substitutes for .env and is trusted.
+    if [ -z "${LAKEHOUSE_ENV_FILE:-}" ] && [ ! -f "$PROJECT_ROOT/.env" ]; then
+        echo -e "${RED}✗ No .env file found — services need credentials.${NC}"
+        echo -e "   ${YELLOW}→ Run './lakehouse setup' first to generate .env.${NC}"
+        return 1
+    fi
+
     # Check port availability before starting
     if ! check_ports_for_service "$service"; then
         echo -e "\n${RED}Aborting start due to port conflicts.${NC}"
