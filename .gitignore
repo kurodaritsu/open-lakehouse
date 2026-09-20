@@ -126,3 +126,6 @@ docker-compose.override.yml
 
 # Compiled UC server extensions (scripts/tools/build-uc-ext.sh)
 jars/uc-ext/
+
+# Local files and data
+**/*.local.*
