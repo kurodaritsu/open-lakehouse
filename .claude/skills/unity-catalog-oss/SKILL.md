@@ -166,12 +166,34 @@ curl -X POST http://localhost:8081/api/2.1/unity-catalog/catalogs -H 'Content-Ty
   (set in `spark-defaults.conf`). Delta's `cleanupTableDefinition` otherwise hands the catalog an
   empty schema, which is why the UC UI showed "No data" for every table before. `CREATE TABLE ...
   USING delta LOCATION` without a column list also registers `columns: []`; spell the columns out.
-- Credential vending vs SeaweedFS: connector 0.5+ signs s3a requests with the vended session token
-  (`AwsSessionCredentials`); SeaweedFS answers `InvalidAccessKeyId` to any request carrying
-  `X-Amz-Security-Token`. `spark.sql.catalog.unity.credScopedFs.enabled=false` and
-  `spark.sql.catalog.unity.renewCredential.enabled=false` keep s3a on
-  `SimpleAWSCredentialsProvider` with the static keys. Untested consequence: managed tables via the
-  Delta API may need the scoped FS.
+- Credential vending vs SeaweedFS: UC's built-in static mode echoes the placeholder
+  `s3.sessionToken.0` back to clients. Two clients want opposite things: SeaweedFS rejects any
+  request carrying `X-Amz-Security-Token` (validates it as an STS JWT -> `InvalidAccessKeyId`), so
+  MLflow's UC artifact repo needs an EMPTY token; the UC Spark connector (`unitycatalog-hadoop`
+  `AwsCredential`) throws "AWS session token is missing" on an empty one. Resolved server-side with
+  a custom `s3.credentialGenerator.0` (`config/unity-catalog/ext/StaticNoTokenCredentialGenerator.java`,
+  compiled by `scripts/tools/build-uc-ext.sh` into `jars/uc-ext/`, mounted at `/opt/uc-ext` and
+  prepended to the classpath by the compose `command`): static keys from
+  `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` env (from `.env`), empty token when the requested
+  path contains `/models/`, `not_used` otherwise. Path is the only discriminator the server sees.
+  Re-run the build script after a UC image bump. Remove once `unitycatalog#1532` lands and UC can
+  assume a role against SeaweedFS's STS (`aws.masterRoleArn`). Upstream refuses S3-compatible
+  endpoint support (`#844`, `#1636` "Won't be merged", `#1743`), so don't wait for that.
+- Spark still runs with `spark.sql.catalog.<cat>.credScopedFs.enabled=false` and
+  `renewCredential.enabled=false`: s3a stays on `SimpleAWSCredentialsProvider` with the static keys
+  from `spark-defaults.conf`. Predates the generator; left in place because the scoped FS would
+  send an empty `X-Amz-Security-Token` header (untested against SeaweedFS).
+- MLflow model registry (`MLFLOW_REGISTRY_URI=uc:http://localhost:8081`, set in `~/.bashrc`):
+  registration, artifact upload to `s3://lakehouse/managed/<catalog>/__unitystorage/catalogs/
+  <id>/models/<id>/versions/<id>`, and `load_model("models:/<cat>.<schema>.<name>/<v>")` all work
+  with the generator above, BUT MLflow's
+  `OptimizedS3ArtifactRepository` first does `HeadBucket` and requires `x-amz-bucket-region` in
+  the response; SeaweedFS (4.47 and master as of 2026-09-20) never sends it, so it fails with
+  "Unable to get the region name for bucket". No MLflow env var bypasses it. Verified end to end
+  only with `OptimizedS3ArtifactRepository._get_region_name` monkeypatched to return
+  `us-east-1`. Open item: either an MLflow PR (fall back to `AWS_DEFAULT_REGION` when HeadBucket
+  carries no region) or a SeaweedFS PR (emit `x-amz-bucket-region` on HeadBucket). Until one lands,
+  model registration from a client needs that two-line patch.
 - `df.write.mode("overwrite").saveAsTable("unity.x.y")` is now `REPLACE TABLE`, which the connector
   rejects for external tables ("only catalog-managed Delta tables can be replaced"). Pattern that
   works: create once with `.option("path", "s3://...")`, then `df.write.mode("overwrite")

@@ -44,10 +44,13 @@ Expected: `All preflight checks passed`. This verifies PostgreSQL is reachable, 
 ```bash
 ./lakehouse start all          # infra (Postgres 18 + SeaweedFS) + Spark 4.1 master + worker + Connect
 ./lakehouse start kafka        # optional, only for streaming demos (not part of `all`)
+bash scripts/tools/build-uc-ext.sh   # once per UC image version; compiles config/unity-catalog/ext -> jars/uc-ext
 ./lakehouse start unity-catalog
 ./lakehouse start mlflow
 ./lakehouse start airflow      # optional, only if demoing orchestration
 ```
+
+**Failure branch — UC exits immediately with `ClassNotFoundException: io.lakehouse.uc.StaticNoTokenCredentialGenerator`**: `jars/uc-ext/` is empty. Run `bash scripts/tools/build-uc-ext.sh` (needs the UC image pulled; it compiles inside it) and start UC again.
 
 `start all` now brings up the **Spark Connect server** (container `spark-connect-41`, gRPC on port 15002) alongside the master and worker. First start pulls `spark-connect_2.13:4.1.0` from Maven on the connect container — that adds ~30s. Subsequent starts hit the local Ivy cache.
 

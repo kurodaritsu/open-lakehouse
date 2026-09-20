@@ -10,7 +10,7 @@ Catalogs (verified — see `.claude/skills/unity-catalog-oss/`):
 - `unity.<schema>.<table>` — Unity Catalog OSS via its Spark connector. **Delta only. Primary write path.**
 - `example.<schema>.<table>` — second UC catalog on the same server: UC demo assets (`default`, `commerce`, `consumer`) and `mnist`. Demo tables point at container-local `file://` paths, so only `mnist.images` is readable from Spark.
 
-Storage layout on SeaweedFS: managed tables/volumes under `s3://lakehouse/managed/<catalog>` (catalog `storage_root`, set over REST at create time; UI can't), external tables at `s3://lakehouse/external/<catalog>/<schema>/<table>`. `storage-root.tables` in `server.properties` is the fallback for catalogs without a root. See `.claude/skills/unity-catalog-oss/`.
+Storage layout on SeaweedFS: managed tables/volumes under `s3://lakehouse/managed/<catalog>` (catalog `storage_root`, set over REST at create time; UI can't), external tables at `s3://lakehouse/external/<catalog>/<schema>/<table>`. `storage-root.tables` in `server.properties` is the fallback for catalogs without a root. UC vends static keys without a session token via `config/unity-catalog/ext/` (build with `scripts/tools/build-uc-ext.sh` after a UC bump). See `.claude/skills/unity-catalog-oss/`.
 - `iceberg.<schema>.<table>` — UC OSS Iceberg REST endpoint. **Read-only** — UC OSS (still in 0.6.0) exposes no Iceberg write endpoints.
 - `spark_catalog.<schema>.<table>` — default catalog set to `DeltaCatalog`; path-based / local Delta.
 

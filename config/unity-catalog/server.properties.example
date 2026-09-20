@@ -30,6 +30,12 @@ s3.region.0=us-east-1
 s3.accessKey.0=your_seaweedfs_access_key
 s3.secretKey.0=your_seaweedfs_secret_key
 s3.sessionToken.0=not_used
+# Custom vendor: returns the static keys with an EMPTY session token. UC's built-in
+# static mode echoes the placeholder above, and SeaweedFS rejects any request that
+# carries X-Amz-Security-Token (InvalidAccessKeyId). sessionToken.0 must stay
+# non-empty so UC loads this bucket block at all; the generator ignores it.
+# Source: config/unity-catalog/ext/, built by scripts/tools/build-uc-ext.sh.
+s3.credentialGenerator.0=io.lakehouse.uc.StaticNoTokenCredentialGenerator
 # Custom endpoint for SeaweedFS. NOTE: UC server (0.4.x and 0.6.0) never reads this
 # key — ServerProperties.getS3Configurations() only reads bucketPath/region/
 # awsRoleArn/accessKey/secretKey/sessionToken/credentialGenerator. It only vends

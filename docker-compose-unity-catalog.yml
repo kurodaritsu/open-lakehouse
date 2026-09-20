@@ -36,8 +36,15 @@ services:
       - "8081:8080"      # REST API + Iceberg REST Catalog endpoint (8081 host, SeaweedFS uses 8080)
     environment:
       - JAVA_OPTS=-Xmx2g
+      # Read by the StaticNoTokenCredentialGenerator extension (config/unity-catalog/ext).
+      - AWS_ACCESS_KEY_ID=${S3_ACCESS_KEY:?set in .env}
+      - AWS_SECRET_ACCESS_KEY=${S3_SECRET_KEY:?set in .env}
+    # Same one-liner as bin/start-uc-server, with jars/uc-ext prepended so the
+    # s3.credentialGenerator.0 class from server.properties resolves. Build it with
+    # scripts/tools/build-uc-ext.sh (re-run after a UC image bump).
+    command: ["sh", "-c", "exec java -cp /opt/uc-ext:$$(cat server/target/classpath) io.unitycatalog.server.UnityCatalogServer"]
     volumes:
-      #- ./config/unity-catalog:/opt/unitycatalog/etc/conf
+      - ./jars/uc-ext:/opt/uc-ext:ro
       - type: bind
         source: ./config/unity-catalog/server.properties
         target: /home/unitycatalog/etc/conf/server.properties
