@@ -20,10 +20,29 @@ spark.sql.extensions                      org.apache.iceberg.spark.extensions.Ic
 spark.sql.catalog.unity                   io.unitycatalog.spark.UCSingleCatalog
 spark.sql.catalog.unity.uri               http://localhost:8081
 spark.sql.catalog.unity.token             not_used
+# Connector 0.5+ vends creds from UC and, by default, wraps s3a in a credential-
+# scoped filesystem that signs with a session token (AwsSessionCredentials).
+# UC only vends static creds here (server.properties s3.sessionToken.0 must be
+# non-empty for that path), and SeaweedFS rejects any request carrying
+# X-Amz-Security-Token with InvalidAccessKeyId. Disable both so s3a keeps
+# using SimpleAWSCredentialsProvider with the static keys below.
+spark.sql.catalog.unity.credScopedFs.enabled    false
+spark.sql.catalog.unity.renewCredential.enabled false
+
+# example — same UC server, second catalog holding the UC demo assets and mnist.
+spark.sql.catalog.example                 io.unitycatalog.spark.UCSingleCatalog
+spark.sql.catalog.example.uri             http://localhost:8081
+spark.sql.catalog.example.token           not_used
+spark.sql.catalog.example.credScopedFs.enabled    false
+spark.sql.catalog.example.renewCredential.enabled false
 
 # Default Spark catalog as DeltaCatalog — Delta extension functions
 # (CREATE/INSERT/MERGE) need this even when operating on unity.* tables.
 spark.sql.catalog.spark_catalog           org.apache.spark.sql.delta.catalog.DeltaCatalog
+# Delta empties the schema before registering a table in any catalog unless this
+# is on (CreateDeltaTableLike.cleanupTableDefinition). Without it UC stores
+# `columns: []` and the UC UI shows "No data" for every table.
+spark.databricks.delta.catalog.update.enabled true
 
 # ----------------------------------------------------------------------------
 # iceberg — UC OSS Iceberg REST endpoint, READ-ONLY
@@ -45,6 +64,11 @@ spark.hadoop.fs.s3a.secret.key            your_secret_key
 spark.hadoop.fs.s3a.path.style.access     true
 spark.hadoop.fs.s3a.impl                  org.apache.hadoop.fs.s3a.S3AFileSystem
 spark.hadoop.fs.s3a.connection.ssl.enabled false
+# UC credential vending hands Spark the static keys plus the placeholder
+# s3.sessionToken.0 from server.properties. SeaweedFS 4.x validates any session
+# token as an STS token and 403s on the placeholder, so skip the Temporary
+# provider and sign with access/secret only.
+spark.hadoop.fs.s3a.aws.credentials.provider org.apache.hadoop.fs.s3a.SimpleAWSCredentialsProvider
 # SeaweedFS S3 returns HTTP 500 on bulk DeleteObjects and on the Hadoop
 # FileOutputCommitter's directory-marker cleanup. Delete one object at a time
 # and keep directory markers so recursive deletes / commits don't fail.
@@ -60,8 +84,8 @@ spark.hadoop.fs.AbstractFileSystem.s3.impl org.apache.hadoop.fs.s3a.S3A
 # Required JARs
 # ============================================================================
 # All downloaded by `./lakehouse setup` (scripts/tools/download-jars.sh).
-# Delta is 4.2.0 — required for Spark 4.1 ABI compatibility.
-spark.jars  /opt/spark/jars-extra/iceberg-spark-runtime-4.0_2.13-1.10.0.jar,/opt/spark/jars-extra/delta-spark_2.13-4.2.0.jar,/opt/spark/jars-extra/delta-storage-4.2.0.jar,/opt/spark/jars-extra/unitycatalog-spark_2.13-0.3.0.jar,/opt/spark/jars-extra/unitycatalog-client-0.3.0.jar,/opt/spark/jars-extra/hadoop-aws-3.4.1.jar,/opt/spark/jars-extra/aws-java-sdk-bundle-1.12.780.jar,/opt/spark/jars-extra/bundle-2.24.6.jar
+# Delta 4.4.0 (Spark 4.1 artifact) + UC Spark connector 0.6.0. Kernel jars are Delta 4.3+ deps.
+spark.jars  /opt/spark/jars-extra/iceberg-spark-runtime-4.0_2.13-1.10.0.jar,/opt/spark/jars-extra/delta-spark_4.1_2.13-4.4.0.jar,/opt/spark/jars-extra/delta-storage-4.4.0.jar,/opt/spark/jars-extra/delta-kernel-api-4.4.0.jar,/opt/spark/jars-extra/delta-kernel-defaults-4.4.0.jar,/opt/spark/jars-extra/delta-kernel-unitycatalog-4.4.0.jar,/opt/spark/jars-extra/jackson-datatype-jdk8-2.20.0.jar,/opt/spark/jars-extra/unitycatalog-spark_4.1_2.13-0.6.0.jar,/opt/spark/jars-extra/unitycatalog-client-0.6.0.jar,/opt/spark/jars-extra/unitycatalog-hadoop-0.6.0.jar,/opt/spark/jars-extra/jackson-databind-nullable-0.2.6.jar,/opt/spark/jars-extra/hadoop-aws-3.4.1.jar,/opt/spark/jars-extra/aws-java-sdk-bundle-1.12.780.jar,/opt/spark/jars-extra/bundle-2.24.6.jar
 
 # ============================================================================
 # Performance Tuning

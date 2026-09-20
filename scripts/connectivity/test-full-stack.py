@@ -215,7 +215,8 @@ def test_iceberg_bronze_write(spark, events_df):
         spark.sql("DROP TABLE IF EXISTS iceberg.test_full_stack.bronze_orders")
 
         # Create bronze table
-        spark.sql("""
+        spark.sql(
+            """
             CREATE TABLE iceberg.test_full_stack.bronze_orders (
                 event_id STRING,
                 event_type STRING,
@@ -229,7 +230,8 @@ def test_iceberg_bronze_write(spark, events_df):
                 total DOUBLE,
                 ingested_at TIMESTAMP
             ) USING iceberg
-        """)
+        """
+        )
         print("  Created table: iceberg.test_full_stack.bronze_orders")
 
         # Add ingestion timestamp and write
@@ -264,7 +266,8 @@ def test_silver_transformation(spark):
         spark.sql("DROP TABLE IF EXISTS iceberg.test_full_stack.silver_orders")
 
         # Create silver table with transformations
-        spark.sql("""
+        spark.sql(
+            """
             CREATE TABLE iceberg.test_full_stack.silver_orders
             USING iceberg
             AS
@@ -283,7 +286,8 @@ def test_silver_transformation(spark):
                 current_timestamp() as processed_at
             FROM iceberg.test_full_stack.bronze_orders
             WHERE order_id IS NOT NULL
-        """)
+        """
+        )
 
         count = spark.sql(
             "SELECT COUNT(*) FROM iceberg.test_full_stack.silver_orders"
@@ -291,10 +295,12 @@ def test_silver_transformation(spark):
         print(f"  Transformed {count} records to silver layer")
 
         print("\n  Silver layer sample:")
-        spark.sql("""
+        spark.sql(
+            """
             SELECT order_id, product_name, total, order_date, order_hour
             FROM iceberg.test_full_stack.silver_orders
-        """).show(3)
+        """
+        ).show(3)
 
         if count > 0:
             print("  ✅ Silver layer transformation successful")
@@ -319,7 +325,8 @@ def test_gold_aggregation(spark):
         spark.sql("DROP TABLE IF EXISTS iceberg.test_full_stack.gold_customer_summary")
 
         # Create gold aggregation
-        spark.sql("""
+        spark.sql(
+            """
             CREATE TABLE iceberg.test_full_stack.gold_customer_summary
             USING iceberg
             AS
@@ -334,7 +341,8 @@ def test_gold_aggregation(spark):
                 current_timestamp() as aggregated_at
             FROM iceberg.test_full_stack.silver_orders
             GROUP BY customer_id
-        """)
+        """
+        )
 
         count = spark.sql(
             "SELECT COUNT(*) FROM iceberg.test_full_stack.gold_customer_summary"
@@ -342,11 +350,13 @@ def test_gold_aggregation(spark):
         print(f"  Created {count} customer summaries in gold layer")
 
         print("\n  Gold layer (customer summary):")
-        spark.sql("""
+        spark.sql(
+            """
             SELECT customer_id, total_orders, total_revenue, avg_order_value
             FROM iceberg.test_full_stack.gold_customer_summary
             ORDER BY total_revenue DESC
-        """).show()
+        """
+        ).show()
 
         if count > 0:
             print("  ✅ Gold layer aggregation successful")
@@ -398,11 +408,13 @@ def test_postgres_catalog(spark):
         cursor = conn.cursor()
 
         # Check iceberg_tables
-        cursor.execute("""
+        cursor.execute(
+            """
             SELECT table_namespace, table_name
             FROM iceberg_tables
             WHERE table_namespace LIKE '%test_full_stack%'
-        """)
+        """
+        )
         tables = cursor.fetchall()
 
         print(f"  Found {len(tables)} tables in PostgreSQL catalog:")

@@ -42,15 +42,19 @@ Expected: `All preflight checks passed`. This verifies PostgreSQL is reachable, 
 ## Step 3 — core services (90–120s with first-run package downloads)
 
 ```bash
-./lakehouse start all          # Spark 4.1 master + worker + Connect server + Kafka
+./lakehouse start all          # infra (Postgres 18 + SeaweedFS) + Spark 4.1 master + worker + Connect
+./lakehouse start kafka        # optional, only for streaming demos (not part of `all`)
+bash scripts/tools/build-uc-ext.sh   # once per UC image version; compiles config/unity-catalog/ext -> jars/uc-ext
 ./lakehouse start unity-catalog
 ./lakehouse start mlflow
 ./lakehouse start airflow      # optional, only if demoing orchestration
 ```
 
+**Failure branch — UC exits immediately with `ClassNotFoundException: io.lakehouse.uc.StaticNoTokenCredentialGenerator`**: `jars/uc-ext/` is empty. Run `bash scripts/tools/build-uc-ext.sh` (needs the UC image pulled; it compiles inside it) and start UC again.
+
 `start all` now brings up the **Spark Connect server** (container `spark-connect-41`, gRPC on port 15002) alongside the master and worker. First start pulls `spark-connect_2.13:4.1.0` from Maven on the connect container — that adds ~30s. Subsequent starts hit the local Ivy cache.
 
-Order matters: Spark and Kafka can start in parallel; Unity Catalog should be up before any Spark job that talks to the catalog; Airflow depends on Postgres which is external (system PostgreSQL on port 5432).
+Order matters: infra first (`start all` does this); Spark and Kafka can start in parallel; Unity Catalog should be up before any Spark job that talks to the catalog; Airflow and MLflow depend on the `lakehouse-postgres` container on port 5432.
 
 The CLI exports `LAKEHOUSE_SPARK_REMOTE=sc://localhost:15002` and `LAKEHOUSE_SPARK_MODE=connect`. Demos should read these instead of hardcoding the endpoint.
 

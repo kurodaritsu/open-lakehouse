@@ -45,8 +45,11 @@ nano config/spark/spark-defaults.conf
 ## Start
 
 ```bash
-# Start all services
+# Start infra (PostgreSQL + SeaweedFS containers) + Spark
 ./lakehouse start all
+
+# Optional: Kafka, only needed for the streaming demos
+# ./lakehouse start kafka
 
 # Verify everything works
 ./lakehouse test
@@ -56,7 +59,7 @@ Expected output:
 ```
 ✓ PostgreSQL connected
 ✓ SeaweedFS responding
-✓ Kafka broker healthy
+! Kafka not started (optional: ./lakehouse start kafka)
 ✓ Spark master healthy
 All tests passed!
 ```

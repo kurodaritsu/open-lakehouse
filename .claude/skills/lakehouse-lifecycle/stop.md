@@ -5,7 +5,8 @@ Goal: bring everything down cleanly, and know exactly what survives.
 ## Default — quick stop (preserves what is on a mounted volume)
 
 ```bash
-./lakehouse stop all            # Spark + Kafka
+./lakehouse stop all            # Spark + infra (Postgres + SeaweedFS)
+./lakehouse stop kafka          # only if started
 ./lakehouse stop unity-catalog
 ./lakehouse stop airflow
 ./lakehouse stop mlflow

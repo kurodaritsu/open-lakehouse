@@ -1,4 +1,4 @@
-# Unity Catalog OSS v0.4.0 — the catalog for this stack.
+# Unity Catalog OSS v0.6.0 — the catalog for this stack.
 #
 # Provides:
 # - REST API for Iceberg tables (read-only via Iceberg REST, full CRUD via UC API)
@@ -16,35 +16,39 @@
 # Then configure Spark to use Unity Catalog REST endpoint:
 #   spark.sql.catalog.iceberg.uri = http://localhost:8080/api/2.1/unity-catalog/iceberg
 #
-# New in 0.4.0:
-#   - Catalog-managed commits: set server.managed-table.enabled=true in server.properties
-#   - External locations API: POST /api/2.1/unity-catalog/external-locations
-#   - Storage credentials API: POST /api/2.1/unity-catalog/credentials
-#   - Managed storage on catalogs/schemas (storage_root parameter)
-#   - UniForm improvements (Delta-to-Iceberg atomic metadata updates)
+# New since 0.5.0 / 0.6.0:
+#   - UC Delta API (/api/2.1/unity-catalog/delta/v1/...): catalog-managed Delta
+#     tables, schema travels through the catalog. server.managed-table.enabled
+#     defaults to true. Managed tables need a storage_root on the schema.
+#   - Spark connector artifact is per Spark version (unitycatalog-spark_4.1_2.13).
+#   - Connector now registers column metadata in UC (0.3.0 left `columns` empty).
+#   - SQL views / metric views (create needs Spark 4.2; 4.1 can only read).
 
 services:
   unity-catalog:
-    # newfrontdocker/unitycatalog:v0.4.1 is an OFFICIAL STAGING image (Docker Hub:
-    # "used to test containers before publishing in unitycatalog/unitycatalog"),
-    # published by a UC committer — NOT a community fork. We use it only because
-    # official Docker Hub never shipped a v0.4.1 container (its tags jump v0.4.0 ->
-    # v0.5.0). It adds NO Iceberg write support — neither does official 0.5.0; UC OSS
-    # 0.4.x rejects data_source_format=ICEBERG outright, so this catalog is Delta-only
-    # for writes and Iceberg-read-only (see CLAUDE.md). Moving to a mounted uc-data
-    # volume / a UC upgrade is PR #1 — do not change the image here.
-    image: newfrontdocker/unitycatalog:v0.4.1
+    # Official image. Still NO Iceberg write support (Iceberg REST is read-only), so this
+    # catalog is Delta-only for writes (see CLAUDE.md). Catalog metadata lives in
+    # H2 under etc/db — persisted on the uc-data volume; without it every image
+    # swap or `down` wiped all catalogs/schemas/table registrations.
+    image: unitycatalog/unitycatalog:v0.6.0
     container_name: unity-catalog
     ports:
       - "8081:8080"      # REST API + Iceberg REST Catalog endpoint (8081 host, SeaweedFS uses 8080)
     environment:
       - JAVA_OPTS=-Xmx2g
+      # Read by the StaticNoTokenCredentialGenerator extension (config/unity-catalog/ext).
+      - AWS_ACCESS_KEY_ID=${S3_ACCESS_KEY:?set in .env}
+      - AWS_SECRET_ACCESS_KEY=${S3_SECRET_KEY:?set in .env}
+    # Same one-liner as bin/start-uc-server, with jars/uc-ext prepended so the
+    # s3.credentialGenerator.0 class from server.properties resolves. Build it with
+    # scripts/tools/build-uc-ext.sh (re-run after a UC image bump).
+    command: ["sh", "-c", "exec java -cp /opt/uc-ext:$$(cat server/target/classpath) io.unitycatalog.server.UnityCatalogServer"]
     volumes:
-      #- ./config/unity-catalog:/opt/unitycatalog/etc/conf
+      - ./jars/uc-ext:/opt/uc-ext:ro
       - type: bind
         source: ./config/unity-catalog/server.properties
         target: /home/unitycatalog/etc/conf/server.properties
-      #- uc-data:/home/unitycatalog/etc/db
+      - uc-data:/home/unitycatalog/etc/db
       - uc-logs:/home/unitycatalog/etc/logs
     healthcheck:
       # The image ships busybox wget, NOT curl — a curl-based check can never pass and
@@ -56,22 +60,30 @@ services:
       start_period: 30s
     restart: unless-stopped
     networks:
-      - lakehouse-network
+      lakehouse-network:
+        aliases:
+          - server
 
-  # Optional: Unity Catalog Web UI
-  # Uncomment to enable the graphical interface
-  # unity-catalog-ui:
-  #   image: unitycatalog/unitycatalog-ui:0.4.0
-  #   container_name: unity-catalog-ui
-  #   ports:
-  #     - "3000:3000"
-  #   environment:
-  #     - UC_API_URL=http://unity-catalog:8080
-  #   depends_on:
-  #     unity-catalog:
-  #       condition: service_healthy
-  #   networks:
-  #     - lakehouse-network
+  # Unity Catalog Web UI (http://localhost:3000). The image's CRA dev server
+  # proxies /api to the hardcoded hostname `server:8080`, so the UC container
+  # carries a `server` alias on the bridge network; UC_API_URL is not read.
+  # No versioned tag exists on Docker Hub (only main / main-<sha>); pinned to a sha.
+  unity-catalog-ui:
+    image: unitycatalog/unitycatalog-ui:main-aadc6fc
+    container_name: unity-catalog-ui
+    ports:
+      - "3000:3000"
+    environment:
+      # CRA dev server: eslint tries to write node_modules/.cache, which fails
+      # under rootless podman with userns=keep-id (image files are root-owned).
+      # Lint is irrelevant for a prebuilt UI, so skip the plugin.
+      - DISABLE_ESLINT_PLUGIN=true
+    depends_on:
+      unity-catalog:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - lakehouse-network
 
 volumes:
   uc-data:

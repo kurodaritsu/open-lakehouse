@@ -1,0 +1,19 @@
+# Test overlay for docker-compose-infra.yml — see tests/overlays/README.md.
+# Run-scoped names + volumes; both services move onto the shared bridge network.
+services:
+  postgres:
+    container_name: lakehouse-postgres-${LAKEHOUSE_RESOURCE_SUFFIX}
+    network_mode: !reset null
+    networks:
+      - default
+
+  seaweedfs:
+    container_name: lakehouse-seaweedfs-${LAKEHOUSE_RESOURCE_SUFFIX}
+    network_mode: !reset null
+    networks:
+      - default
+    # Advertise the run-scoped name so in-network clients resolve it.
+    command: >
+      server -s3 -dir=/data -ip=lakehouse-seaweedfs-${LAKEHOUSE_RESOURCE_SUFFIX} -ip.bind=0.0.0.0
+      -master.port=9333 -volume.port=8080 -filer.port=8888 -s3.port=8333
+      -volume.max=0

@@ -41,7 +41,8 @@ services:
       - mlflow-data:/mlflow
     network_mode: host
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      # The mlflow image ships no curl; probe with its own python instead.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
       interval: 30s
       timeout: 10s
       retries: 3

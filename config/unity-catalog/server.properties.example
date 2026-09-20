@@ -30,7 +30,16 @@ s3.region.0=us-east-1
 s3.accessKey.0=your_seaweedfs_access_key
 s3.secretKey.0=your_seaweedfs_secret_key
 s3.sessionToken.0=not_used
-# Custom endpoint for SeaweedFS (comment out for real AWS S3)
+# Custom vendor: returns the static keys with an EMPTY session token. UC's built-in
+# static mode echoes the placeholder above, and SeaweedFS rejects any request that
+# carries X-Amz-Security-Token (InvalidAccessKeyId). sessionToken.0 must stay
+# non-empty so UC loads this bucket block at all; the generator ignores it.
+# Source: config/unity-catalog/ext/, built by scripts/tools/build-uc-ext.sh.
+s3.credentialGenerator.0=io.lakehouse.uc.StaticNoTokenCredentialGenerator
+# Custom endpoint for SeaweedFS. NOTE: UC server (0.4.x and 0.6.0) never reads this
+# key — ServerProperties.getS3Configurations() only reads bucketPath/region/
+# awsRoleArn/accessKey/secretKey/sessionToken/credentialGenerator. It only vends
+# the static creds; the Spark client resolves the endpoint via fs.s3a.endpoint.
 s3.endpoint.0=http://localhost:8333
 
 # ============================================================================
@@ -57,3 +66,13 @@ s3.endpoint.0=http://localhost:8333
 # OAuth block — see the upstream lakehouse-stack repo's server.properties
 # for a Keycloak example.
 server.authorization=disable
+
+# Fallback managed storage (metastore-level root in Databricks terms). Only used
+# when neither the schema nor the catalog has a storage_root; the convention is a
+# catalog-level storage_root of s3://lakehouse/managed/<catalog> set over REST at
+# create time (the UI can't). Fallback path for managed tables is
+# s3://lakehouse/managed/__unitystorage/tables/<table_id>; managed volumes have no
+# fallback and fail without a catalog/schema root. Marked deprecated upstream but
+# still wired in StagingTableRepository (0.6.0). External tables are unaffected;
+# convention is s3://lakehouse/external/<catalog>/<schema>/<table>.
+storage-root.tables=s3://lakehouse/managed

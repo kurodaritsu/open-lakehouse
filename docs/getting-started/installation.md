@@ -12,13 +12,24 @@ This guide walks you through setting up the lakehouse stack from scratch. Follow
 | Poetry | Yes | Python dependency management |
 | Python 3.10+ | Yes | Scripts and test data generation |
 | curl | Yes | HTTP requests |
-| PostgreSQL 16 | Yes | Iceberg catalog metadata |
-| SeaweedFS | Yes | S3-compatible object storage |
+| PostgreSQL 18 | Yes | Metadata DBs. Runs as a container via `./lakehouse start infra` (host install optional) |
+| SeaweedFS 4.47 | Yes | S3-compatible object storage. Same container path as PostgreSQL |
 | Java 17+ | Recommended | Local spark-submit |
-| nc (netcat) | Recommended | Port checks |
-| psql | Recommended | PostgreSQL testing |
+| psql | Optional | The CLI falls back to a containerized client |
 
 ---
+
+## Containerized PostgreSQL + SeaweedFS (default)
+
+`docker-compose-infra.yml` runs PostgreSQL 18 and SeaweedFS 4.47 (S3 gateway on
+8333) as containers on the host network, with credentials taken from `.env`.
+`./lakehouse start infra` (also part of `start all`) brings them up and creates
+the `S3_BUCKET` bucket; `./lakehouse setup` creates the `iceberg_catalog` DB.
+Data lives on the `pg-data` and `seaweed-data` named volumes.
+
+Skip the PostgreSQL / SeaweedFS host-install steps below if you use this.
+Rootless Podman works too: `podman compose` (podman-compose) is picked up when
+`docker` resolves to podman; only `.env` has to be filled in first.
 
 ## macOS Setup
 

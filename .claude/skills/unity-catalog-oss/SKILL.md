@@ -7,7 +7,7 @@ description: Unity Catalog OSS 0.4.x — the only catalog in this stack. Load wh
 
 This stack uses **Unity Catalog OSS only**. There is no PostgreSQL JDBC catalog path. If you see `spark.sql.catalog.iceberg.type=jdbc` or `spark.sql.catalog.iceberg.jdbc.user` anywhere, that's a leftover bug from the upstream lakehouse-stack reference — remove it, don't replicate it.
 
-UC OSS runs as a Java server. The compose definition is `docker-compose-unity-catalog.yml`. Backing store is PostgreSQL. REST API is on `localhost:8081`.
+UC OSS runs as a Java server. The compose definition is `docker-compose-unity-catalog.yml`. Backing store is embedded H2 on the `uc-data` volume. REST API is on `localhost:8081`.
 
 ## Endpoints
 
@@ -56,9 +56,9 @@ Auth: 0.4.x ships with no auth by default for local. Don't add a bearer token un
 
 ## Backing store
 
-UC OSS stores its catalog metadata in PostgreSQL. Connection details are in `config/unity-catalog/server.properties`. The PostgreSQL instance is the same one used by Airflow / system Postgres on host port 5432. UC creates its tables under a `unitycatalog` schema.
+UC OSS stores its catalog metadata in an embedded H2 file, `/home/unitycatalog/etc/db/h2db.mv.db` inside the container (the image's stock `hibernate.properties`; no PostgreSQL involved). Since the 0.6.0 bump it sits on the `uc-data` named volume, so container recreation keeps catalogs/schemas/table registrations. Before that it was ephemeral: every image swap wiped the catalog and tables had to be re-registered with `CREATE TABLE ... USING delta LOCATION 's3://...'`.
 
-Schema migrations for UC's tables are auto-applied at startup; you don't manage them.
+`./lakehouse backup` / `restore` copy the H2 file (`uc_h2_backup`). Hibernate `hbm2ddl.auto=update` handles schema changes at startup; you don't manage them.
 
 ## Credential vending
 
@@ -123,10 +123,95 @@ UC OSS's write story is partial and format-specific. What was actually tested:
   a non-null `s3.sessionToken.0` (any placeholder) or the bucket won't load
   and credential vending fails with "S3 bucket configuration not found."
 
+## Storage convention (since 2026-09-20)
+
+Same three-tier model as Databricks managed storage (schema > catalog > server default):
+
+- **Catalog-level `storage_root` is the tier we use**: `s3://lakehouse/managed/<catalog>`. Managed
+  tables and managed volumes then land at
+  `s3://lakehouse/managed/<catalog>/__unitystorage/catalogs/<catalog_id>/{tables,volumes}/<id>`.
+  `unity` and `example` are set up this way.
+- **Server default** `storage-root.tables=s3://lakehouse/managed` (`server.properties`) is the
+  safety net for catalogs created without a `storage_root` (UC UI has no field for it): managed
+  tables go to `s3://lakehouse/managed/__unitystorage/tables/<table_id>`; managed volumes fail
+  there (`FAILED_PRECONDITION`, no `storage-root.volumes` exists). So: create catalogs over REST
+  with `storage_root`, not from the UI.
+- Schemas: create them anywhere (UI, Spark `CREATE SCHEMA`, REST); they inherit the catalog root.
+  A schema-level `storage_root` is possible over REST but not part of the convention.
+- **External tables**: `s3://lakehouse/external/<catalog>/<schema>/<table>`, passed as `LOCATION` /
+  `.option("path", ...)`. Never register a table at a parent prefix; UC rejects anything nested
+  under an existing table path afterwards.
+- `storage_root` is set at create time only (`UpdateCatalog`/`UpdateSchema` don't carry it), and
+  the Spark connector ignores `CREATE SCHEMA ... LOCATION`.
+- Managed tables use the catalogManaged protocol (reader v3 / writer v7, column mapping, DVs, row
+  tracking). Other engines must go through the UC Delta API to find the path and need to support
+  those features. `DROP TABLE` on a managed table removes only the catalog entry; UC OSS's S3
+  delete is a no-op, so the files under `managed/` stay until removed by hand.
+- History: `unity.common.us_states_metadata` and `example.mnist.images` were moved under
+  `external/`; both catalogs were recreated to attach the `storage_root`. All ids changed.
+
+Create a catalog the convention way:
+
+```bash
+curl -X POST http://localhost:8081/api/2.1/unity-catalog/catalogs -H 'Content-Type: application/json' \
+  -d '{"name":"<catalog>","storage_root":"s3://lakehouse/managed/<catalog>"}'
+```
+
+## 0.6.0 notes (bumped 2026-09-20 from 0.4.1; connector 0.3.0 -> 0.6.0, Delta 4.2.0 -> 4.4.0)
+
+- Connector artifact is per Spark version since 0.5.0: `unitycatalog-spark_4.1_2.13`. Runtime deps
+  `unitycatalog-client`, `unitycatalog-hadoop`, `jackson-databind-nullable`. Delta 4.3+ brings
+  `delta-kernel-api/defaults/unitycatalog` + `jackson-datatype-jdk8`. All in `download-jars.sh`.
+- UC `columns` are populated only with `spark.databricks.delta.catalog.update.enabled=true`
+  (set in `spark-defaults.conf`). Delta's `cleanupTableDefinition` otherwise hands the catalog an
+  empty schema, which is why the UC UI showed "No data" for every table before. `CREATE TABLE ...
+  USING delta LOCATION` without a column list also registers `columns: []`; spell the columns out.
+- Credential vending vs SeaweedFS: UC's built-in static mode echoes the placeholder
+  `s3.sessionToken.0` back to clients. Two clients want opposite things: SeaweedFS rejects any
+  request carrying `X-Amz-Security-Token` (validates it as an STS JWT -> `InvalidAccessKeyId`), so
+  MLflow's UC artifact repo needs an EMPTY token; the UC Spark connector (`unitycatalog-hadoop`
+  `AwsCredential`) throws "AWS session token is missing" on an empty one. Resolved server-side with
+  a custom `s3.credentialGenerator.0` (`config/unity-catalog/ext/StaticNoTokenCredentialGenerator.java`,
+  compiled by `scripts/tools/build-uc-ext.sh` into `jars/uc-ext/`, mounted at `/opt/uc-ext` and
+  prepended to the classpath by the compose `command`): static keys from
+  `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` env (from `.env`), empty token when the requested
+  path contains `/models/`, `not_used` otherwise. Path is the only discriminator the server sees.
+  Re-run the build script after a UC image bump. Remove once `unitycatalog#1532` lands and UC can
+  assume a role against SeaweedFS's STS (`aws.masterRoleArn`). Upstream refuses S3-compatible
+  endpoint support (`#844`, `#1636` "Won't be merged", `#1743`), so don't wait for that.
+- Spark still runs with `spark.sql.catalog.<cat>.credScopedFs.enabled=false` and
+  `renewCredential.enabled=false`: s3a stays on `SimpleAWSCredentialsProvider` with the static keys
+  from `spark-defaults.conf`. Predates the generator; left in place because the scoped FS would
+  send an empty `X-Amz-Security-Token` header (untested against SeaweedFS).
+- MLflow model registry (`MLFLOW_REGISTRY_URI=uc:http://localhost:8081`, set in `~/.bashrc`):
+  registration, artifact upload to `s3://lakehouse/managed/<catalog>/__unitystorage/catalogs/
+  <id>/models/<id>/versions/<id>`, and `load_model("models:/<cat>.<schema>.<name>/<v>")` all work
+  with the generator above, BUT MLflow's
+  `OptimizedS3ArtifactRepository` first does `HeadBucket` and requires `x-amz-bucket-region` in
+  the response; SeaweedFS (4.47 and master as of 2026-09-20) never sends it, so it fails with
+  "Unable to get the region name for bucket". No MLflow env var bypasses it. Verified end to end
+  only with `OptimizedS3ArtifactRepository._get_region_name` monkeypatched to return
+  `us-east-1`. Open item: either an MLflow PR (fall back to `AWS_DEFAULT_REGION` when HeadBucket
+  carries no region) or a SeaweedFS PR (emit `x-amz-bucket-region` on HeadBucket). Until one lands,
+  model registration from a client needs that two-line patch.
+- `df.write.mode("overwrite").saveAsTable("unity.x.y")` is now `REPLACE TABLE`, which the connector
+  rejects for external tables ("only catalog-managed Delta tables can be replaced"). Pattern that
+  works: create once with `.option("path", "s3://...")`, then `df.write.mode("overwrite")
+  .insertInto(table)`. CTAS into a non-empty location also fails
+  (`DELTA_CREATE_TABLE_WITH_NON_EMPTY_LOCATION`), so a DROP + recreate needs the prefix wiped first.
+- UC Delta API (`/api/2.1/unity-catalog/delta/v1/...`) for catalog-managed Delta tables;
+  `server.managed-table.enabled` defaults to true. Managed tables need a `storage_root` on the schema
+  (`CreateSchema.storage_root`; catalog `storage_root` is not patchable). External tables with an
+  explicit `s3://` location are unchanged.
+- `s3.endpoint.0` in `server.properties` is ignored by the server (never was read). The server only
+  vends static creds; Spark resolves the endpoint from `fs.s3a.endpoint`. Consequence: the server-side
+  Iceberg REST read path (`S3FileIO`) has no SeaweedFS endpoint override and likely never worked here.
+- Iceberg REST is still read-only.
+- Terraform `spark-ecs` Dockerfile ARGs still pin the old versions; not updated.
+
 ## When something's wrong
 
 `./lakehouse logs unity-catalog | tail -100` shows the Java server's stdout. Most failures are:
 
-1. PostgreSQL not reachable → UC crash-loops.
-2. `server.properties` references a SeaweedFS endpoint that's not up yet → table operations fail with S3 errors, catalog ops still succeed.
-3. Stale schema migrations after a UC OSS version bump → wipe the `unitycatalog` schema in Postgres and restart UC.
+1. SeaweedFS not up yet → credential-vended table operations fail with S3 errors, catalog ops still succeed.
+2. Broken H2 after a UC version bump → `podman volume rm open-lakehouse_uc-data` (loses registrations; Delta data in SeaweedFS survives) and re-register tables with `CREATE TABLE ... LOCATION`.

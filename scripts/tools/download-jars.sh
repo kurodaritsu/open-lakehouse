@@ -35,14 +35,24 @@ JAR_LIST=(
     "aws-java-sdk-bundle-1.12.780.jar|https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-bundle/1.12.780/aws-java-sdk-bundle-1.12.780.jar|350000000"
     "bundle-2.24.6.jar|https://repo1.maven.org/maven2/software/amazon/awssdk/bundle/2.24.6/bundle-2.24.6.jar|400000000"
     "postgresql-42.7.4.jar|https://repo1.maven.org/maven2/org/postgresql/postgresql/42.7.4/postgresql-42.7.4.jar|1000000"
-    # Delta 4.2.0 — required for Spark 4.1 ABI compatibility (4.0.x breaks with
-    # NoSuchMethodError on org.apache.spark.internal.LogKey).
-    "delta-spark_2.13-4.2.0.jar|https://repo1.maven.org/maven2/io/delta/delta-spark_2.13/4.2.0/delta-spark_2.13-4.2.0.jar|8000000"
-    "delta-storage-4.2.0.jar|https://repo1.maven.org/maven2/io/delta/delta-storage/4.2.0/delta-storage-4.2.0.jar|70000"
-    # Unity Catalog OSS Spark connector — lets Spark write Delta tables that
-    # register in UC (catalog `unity`). client jar is its runtime dep.
-    "unitycatalog-spark_2.13-0.3.0.jar|https://repo1.maven.org/maven2/io/unitycatalog/unitycatalog-spark_2.13/0.3.0/unitycatalog-spark_2.13-0.3.0.jar|20000"
-    "unitycatalog-client-0.3.0.jar|https://repo1.maven.org/maven2/io/unitycatalog/unitycatalog-client/0.3.0/unitycatalog-client-0.3.0.jar|250000"
+    # Delta 4.4.0, Spark 4.1 artifact (delta-spark_4.1_2.13). 4.0.x breaks on Spark
+    # 4.1 with NoSuchMethodError on org.apache.spark.internal.LogKey. Delta 4.3+
+    # pulls in the delta-kernel jars (UC Delta API client side); kernel-api needs
+    # jackson-datatype-jdk8, which the Spark image doesn't ship.
+    "delta-spark_4.1_2.13-4.4.0.jar|https://repo1.maven.org/maven2/io/delta/delta-spark_4.1_2.13/4.4.0/delta-spark_4.1_2.13-4.4.0.jar|9000000"
+    "delta-storage-4.4.0.jar|https://repo1.maven.org/maven2/io/delta/delta-storage/4.4.0/delta-storage-4.4.0.jar|100000"
+    "delta-kernel-api-4.4.0.jar|https://repo1.maven.org/maven2/io/delta/delta-kernel-api/4.4.0/delta-kernel-api-4.4.0.jar|2500000"
+    "delta-kernel-defaults-4.4.0.jar|https://repo1.maven.org/maven2/io/delta/delta-kernel-defaults/4.4.0/delta-kernel-defaults-4.4.0.jar|200000"
+    "delta-kernel-unitycatalog-4.4.0.jar|https://repo1.maven.org/maven2/io/delta/delta-kernel-unitycatalog/4.4.0/delta-kernel-unitycatalog-4.4.0.jar|40000"
+    "jackson-datatype-jdk8-2.20.0.jar|https://repo1.maven.org/maven2/com/fasterxml/jackson/datatype/jackson-datatype-jdk8/2.20.0/jackson-datatype-jdk8-2.20.0.jar|30000"
+    # Unity Catalog OSS Spark connector 0.6.0 — lets Spark write Delta tables that
+    # register in UC (catalog `unity`). Since 0.5.0 the artifact is per Spark
+    # version (_4.1_). client + hadoop jars are its runtime deps; the client's
+    # OpenAPI models need jackson-databind-nullable.
+    "unitycatalog-spark_4.1_2.13-0.6.0.jar|https://repo1.maven.org/maven2/io/unitycatalog/unitycatalog-spark_4.1_2.13/0.6.0/unitycatalog-spark_4.1_2.13-0.6.0.jar|70000"
+    "unitycatalog-client-0.6.0.jar|https://repo1.maven.org/maven2/io/unitycatalog/unitycatalog-client/0.6.0/unitycatalog-client-0.6.0.jar|500000"
+    "unitycatalog-hadoop-0.6.0.jar|https://repo1.maven.org/maven2/io/unitycatalog/unitycatalog-hadoop/0.6.0/unitycatalog-hadoop-0.6.0.jar|70000"
+    "jackson-databind-nullable-0.2.6.jar|https://repo1.maven.org/maven2/org/openapitools/jackson-databind-nullable/0.2.6/jackson-databind-nullable-0.2.6.jar|15000"
     # Spark SQL Kafka connector — needed by any Structured Streaming job that
     # reads/writes Kafka (the realtime-mode demo, any streaming SDP source).
     # `spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.0`
