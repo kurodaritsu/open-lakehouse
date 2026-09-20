@@ -2,8 +2,11 @@
 
 Running Spark Declarative Pipelines so the materialized tables land in **Unity
 Catalog OSS** as Delta tables. This was verified end-to-end on 2026-05-19
-against `newfrontdocker/unitycatalog:v0.4.1` + Spark 4.1 + Delta 4.2.0. The path
-has sharp edges — this file is the map through them.
+against `newfrontdocker/unitycatalog:v0.4.1` + Spark 4.1 + Delta 4.2.0. The stack
+has since moved to UC 0.6.0 + connector 0.6.0 + Delta 4.4.0 (external-table path
+re-verified; the SDP path itself not re-run). See the 0.6.0 notes in the
+`unity-catalog-oss` skill for the credential-vending and REPLACE TABLE changes. The path has sharp edges — this
+file is the map through them.
 
 ## TL;DR — the pattern that works
 

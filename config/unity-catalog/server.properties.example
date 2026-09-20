@@ -30,7 +30,10 @@ s3.region.0=us-east-1
 s3.accessKey.0=your_seaweedfs_access_key
 s3.secretKey.0=your_seaweedfs_secret_key
 s3.sessionToken.0=not_used
-# Custom endpoint for SeaweedFS (comment out for real AWS S3)
+# Custom endpoint for SeaweedFS. NOTE: UC server (0.4.x and 0.6.0) never reads this
+# key — ServerProperties.getS3Configurations() only reads bucketPath/region/
+# awsRoleArn/accessKey/secretKey/sessionToken/credentialGenerator. It only vends
+# the static creds; the Spark client resolves the endpoint via fs.s3a.endpoint.
 s3.endpoint.0=http://localhost:8333
 
 # ============================================================================

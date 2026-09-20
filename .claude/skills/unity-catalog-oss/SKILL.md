@@ -7,7 +7,7 @@ description: Unity Catalog OSS 0.4.x — the only catalog in this stack. Load wh
 
 This stack uses **Unity Catalog OSS only**. There is no PostgreSQL JDBC catalog path. If you see `spark.sql.catalog.iceberg.type=jdbc` or `spark.sql.catalog.iceberg.jdbc.user` anywhere, that's a leftover bug from the upstream lakehouse-stack reference — remove it, don't replicate it.
 
-UC OSS runs as a Java server. The compose definition is `docker-compose-unity-catalog.yml`. Backing store is PostgreSQL. REST API is on `localhost:8081`.
+UC OSS runs as a Java server. The compose definition is `docker-compose-unity-catalog.yml`. Backing store is embedded H2 on the `uc-data` volume. REST API is on `localhost:8081`.
 
 ## Endpoints
 
@@ -56,9 +56,9 @@ Auth: 0.4.x ships with no auth by default for local. Don't add a bearer token un
 
 ## Backing store
 
-UC OSS stores its catalog metadata in PostgreSQL. Connection details are in `config/unity-catalog/server.properties`. The PostgreSQL instance is the same one used by Airflow / system Postgres on host port 5432. UC creates its tables under a `unitycatalog` schema.
+UC OSS stores its catalog metadata in an embedded H2 file, `/home/unitycatalog/etc/db/h2db.mv.db` inside the container (the image's stock `hibernate.properties`; no PostgreSQL involved). Since the 0.6.0 bump it sits on the `uc-data` named volume, so container recreation keeps catalogs/schemas/table registrations. Before that it was ephemeral: every image swap wiped the catalog and tables had to be re-registered with `CREATE TABLE ... USING delta LOCATION 's3://...'`.
 
-Schema migrations for UC's tables are auto-applied at startup; you don't manage them.
+`./lakehouse backup` / `restore` copy the H2 file (`uc_h2_backup`). Hibernate `hbm2ddl.auto=update` handles schema changes at startup; you don't manage them.
 
 ## Credential vending
 
@@ -123,10 +123,39 @@ UC OSS's write story is partial and format-specific. What was actually tested:
   a non-null `s3.sessionToken.0` (any placeholder) or the bucket won't load
   and credential vending fails with "S3 bucket configuration not found."
 
+## 0.6.0 notes (bumped 2026-09-20 from 0.4.1; connector 0.3.0 -> 0.6.0, Delta 4.2.0 -> 4.4.0)
+
+- Connector artifact is per Spark version since 0.5.0: `unitycatalog-spark_4.1_2.13`. Runtime deps
+  `unitycatalog-client`, `unitycatalog-hadoop`, `jackson-databind-nullable`. Delta 4.3+ brings
+  `delta-kernel-api/defaults/unitycatalog` + `jackson-datatype-jdk8`. All in `download-jars.sh`.
+- UC `columns` are populated only with `spark.databricks.delta.catalog.update.enabled=true`
+  (set in `spark-defaults.conf`). Delta's `cleanupTableDefinition` otherwise hands the catalog an
+  empty schema, which is why the UC UI showed "No data" for every table before. `CREATE TABLE ...
+  USING delta LOCATION` without a column list also registers `columns: []`; spell the columns out.
+- Credential vending vs SeaweedFS: connector 0.5+ signs s3a requests with the vended session token
+  (`AwsSessionCredentials`); SeaweedFS answers `InvalidAccessKeyId` to any request carrying
+  `X-Amz-Security-Token`. `spark.sql.catalog.unity.credScopedFs.enabled=false` and
+  `spark.sql.catalog.unity.renewCredential.enabled=false` keep s3a on
+  `SimpleAWSCredentialsProvider` with the static keys. Untested consequence: managed tables via the
+  Delta API may need the scoped FS.
+- `df.write.mode("overwrite").saveAsTable("unity.x.y")` is now `REPLACE TABLE`, which the connector
+  rejects for external tables ("only catalog-managed Delta tables can be replaced"). Pattern that
+  works: create once with `.option("path", "s3://...")`, then `df.write.mode("overwrite")
+  .insertInto(table)`. CTAS into a non-empty location also fails
+  (`DELTA_CREATE_TABLE_WITH_NON_EMPTY_LOCATION`), so a DROP + recreate needs the prefix wiped first.
+- UC Delta API (`/api/2.1/unity-catalog/delta/v1/...`) for catalog-managed Delta tables;
+  `server.managed-table.enabled` defaults to true. Managed tables need a `storage_root` on the schema
+  (`CreateSchema.storage_root`; catalog `storage_root` is not patchable). External tables with an
+  explicit `s3://` location are unchanged.
+- `s3.endpoint.0` in `server.properties` is ignored by the server (never was read). The server only
+  vends static creds; Spark resolves the endpoint from `fs.s3a.endpoint`. Consequence: the server-side
+  Iceberg REST read path (`S3FileIO`) has no SeaweedFS endpoint override and likely never worked here.
+- Iceberg REST is still read-only.
+- Terraform `spark-ecs` Dockerfile ARGs still pin the old versions; not updated.
+
 ## When something's wrong
 
 `./lakehouse logs unity-catalog | tail -100` shows the Java server's stdout. Most failures are:
 
-1. PostgreSQL not reachable → UC crash-loops.
-2. `server.properties` references a SeaweedFS endpoint that's not up yet → table operations fail with S3 errors, catalog ops still succeed.
-3. Stale schema migrations after a UC OSS version bump → wipe the `unitycatalog` schema in Postgres and restart UC.
+1. SeaweedFS not up yet → credential-vended table operations fail with S3 errors, catalog ops still succeed.
+2. Broken H2 after a UC version bump → `podman volume rm open-lakehouse_uc-data` (loses registrations; Delta data in SeaweedFS survives) and re-register tables with `CREATE TABLE ... LOCATION`.

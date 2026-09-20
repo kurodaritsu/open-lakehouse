@@ -11,7 +11,11 @@
 
 services:
   postgres:
-    image: docker.io/library/postgres:18
+    # pgvector image is the official postgres image + the vector extension; drop-in
+    # replacement. Keep the trixie variant: the data dir was initialised on
+    # postgres:18 (trixie, glibc 2.41), and bookworm's glibc 2.36 trips a
+    # collation version mismatch. Enable per-db with `CREATE EXTENSION vector`.
+    image: docker.io/pgvector/pgvector:pg18-trixie
     container_name: lakehouse-postgres
     network_mode: "host"
     environment:

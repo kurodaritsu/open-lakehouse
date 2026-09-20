@@ -1,4 +1,4 @@
-# Unity Catalog OSS v0.4.0 — the catalog for this stack.
+# Unity Catalog OSS v0.6.0 — the catalog for this stack.
 #
 # Provides:
 # - REST API for Iceberg tables (read-only via Iceberg REST, full CRUD via UC API)
@@ -16,24 +16,21 @@
 # Then configure Spark to use Unity Catalog REST endpoint:
 #   spark.sql.catalog.iceberg.uri = http://localhost:8080/api/2.1/unity-catalog/iceberg
 #
-# New in 0.4.0:
-#   - Catalog-managed commits: set server.managed-table.enabled=true in server.properties
-#   - External locations API: POST /api/2.1/unity-catalog/external-locations
-#   - Storage credentials API: POST /api/2.1/unity-catalog/credentials
-#   - Managed storage on catalogs/schemas (storage_root parameter)
-#   - UniForm improvements (Delta-to-Iceberg atomic metadata updates)
+# New since 0.5.0 / 0.6.0:
+#   - UC Delta API (/api/2.1/unity-catalog/delta/v1/...): catalog-managed Delta
+#     tables, schema travels through the catalog. server.managed-table.enabled
+#     defaults to true. Managed tables need a storage_root on the schema.
+#   - Spark connector artifact is per Spark version (unitycatalog-spark_4.1_2.13).
+#   - Connector now registers column metadata in UC (0.3.0 left `columns` empty).
+#   - SQL views / metric views (create needs Spark 4.2; 4.1 can only read).
 
 services:
   unity-catalog:
-    # newfrontdocker/unitycatalog:v0.4.1 is an OFFICIAL STAGING image (Docker Hub:
-    # "used to test containers before publishing in unitycatalog/unitycatalog"),
-    # published by a UC committer — NOT a community fork. We use it only because
-    # official Docker Hub never shipped a v0.4.1 container (its tags jump v0.4.0 ->
-    # v0.5.0). It adds NO Iceberg write support — neither does official 0.5.0; UC OSS
-    # 0.4.x rejects data_source_format=ICEBERG outright, so this catalog is Delta-only
-    # for writes and Iceberg-read-only (see CLAUDE.md). Moving to a mounted uc-data
-    # volume / a UC upgrade is PR #1 — do not change the image here.
-    image: newfrontdocker/unitycatalog:v0.4.1
+    # Official image. Still NO Iceberg write support (Iceberg REST is read-only), so this
+    # catalog is Delta-only for writes (see CLAUDE.md). Catalog metadata lives in
+    # H2 under etc/db — persisted on the uc-data volume; without it every image
+    # swap or `down` wiped all catalogs/schemas/table registrations.
+    image: unitycatalog/unitycatalog:v0.6.0
     container_name: unity-catalog
     ports:
       - "8081:8080"      # REST API + Iceberg REST Catalog endpoint (8081 host, SeaweedFS uses 8080)
@@ -44,7 +41,7 @@ services:
       - type: bind
         source: ./config/unity-catalog/server.properties
         target: /home/unitycatalog/etc/conf/server.properties
-      #- uc-data:/home/unitycatalog/etc/db
+      - uc-data:/home/unitycatalog/etc/db
       - uc-logs:/home/unitycatalog/etc/logs
     healthcheck:
       # The image ships busybox wget, NOT curl — a curl-based check can never pass and

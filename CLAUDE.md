@@ -4,11 +4,11 @@ You are helping with **open-lakehouse**, a composable OSS lakehouse demo platfor
 
 ## Stack
 
-Spark 4.1 (Connect-first) · Kafka 3.6 · Airflow 3.1 · Delta 4.2 + Iceberg 1.10 (both extensions enabled) · Unity Catalog OSS 0.4.x · MLflow 3.13 · SeaweedFS (S3) · PostgreSQL.
+Spark 4.1 (Connect-first) · Kafka 3.6 · Airflow 3.1 · Delta 4.4 + Iceberg 1.10 (both extensions enabled) · Unity Catalog OSS 0.6.0 · MLflow 3.13 · SeaweedFS (S3) · PostgreSQL.
 
 Catalogs (verified — see `.claude/skills/unity-catalog-oss/`):
 - `unity.<schema>.<table>` — Unity Catalog OSS via its Spark connector. **Delta only. Primary write path.**
-- `iceberg.<schema>.<table>` — UC OSS Iceberg REST endpoint. **Read-only** — UC OSS 0.4.x exposes no Iceberg write endpoints.
+- `iceberg.<schema>.<table>` — UC OSS Iceberg REST endpoint. **Read-only** — UC OSS (still in 0.6.0) exposes no Iceberg write endpoints.
 - `spark_catalog.<schema>.<table>` — default catalog set to `DeltaCatalog`; path-based / local Delta.
 
 Runs locally via Docker Compose; deploys to AWS via `terraform/`. Optional Databricks-managed destination in `terraform-databricks/`.
@@ -65,10 +65,10 @@ For the full deterministic runbook, see `.claude/skills/lakehouse-lifecycle/star
 
 - Spark 4.1.0 (Scala 2.13, Java 21)
 - Iceberg 1.10.0
-- Delta 4.2.0 (4.0.x breaks on Spark 4.1 — ABI mismatch)
+- Delta 4.4.0, artifact `delta-spark_4.1_2.13` (4.0.x breaks on Spark 4.1 — ABI mismatch). Pulls in `delta-kernel-*` 4.4.0.
 - Airflow 3.1.6
-- Unity Catalog OSS 0.4.1 (`newfrontdocker/unitycatalog:v0.4.1`)
-- Unity Catalog Spark connector 0.3.0
+- Unity Catalog OSS 0.6.0 (`unitycatalog/unitycatalog:v0.6.0`). H2 metadata on the `uc-data` volume.
+- Unity Catalog Spark connector 0.6.0 (`unitycatalog-spark_4.1_2.13` + `unitycatalog-client` + `unitycatalog-hadoop`)
 - MLflow 3.13 (image base `ghcr.io/mlflow/mlflow:v3.13.0-full`)
 - AWS SDK v2 2.24.6 (exact, for Hadoop 3.4.1 compatibility)
 

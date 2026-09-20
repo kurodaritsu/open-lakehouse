@@ -5,7 +5,7 @@ description: Delta Lake 4.2 operations on Spark 4.1 in this stack. Load when wor
 
 # Delta Lake operations
 
-Delta Lake 4.2.0 is wired by default in this stack. The JARs (`delta-spark_2.13-4.2.0.jar`, `delta-storage-4.2.0.jar`) ship via `./lakehouse setup`, and `config/spark/spark-defaults.conf.example` enables both Iceberg and Delta extensions plus registers `spark_catalog` as the `DeltaCatalog`. You don't need per-session config — just write Delta.
+Delta Lake 4.4.0 is wired by default in this stack. The JARs (`delta-spark_4.1_2.13-4.4.0.jar`, `delta-storage-4.4.0.jar`, `delta-kernel-{api,defaults,unitycatalog}-4.4.0.jar`) ship via `./lakehouse setup`, and `config/spark/spark-defaults.conf.example` enables both Iceberg and Delta extensions plus registers `spark_catalog` as the `DeltaCatalog`. You don't need per-session config — just write Delta.
 
 ```python
 # Sanity check the extensions on a fresh Connect session
