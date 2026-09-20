@@ -60,3 +60,13 @@ s3.endpoint.0=http://localhost:8333
 # OAuth block — see the upstream lakehouse-stack repo's server.properties
 # for a Keycloak example.
 server.authorization=disable
+
+# Fallback managed storage (metastore-level root in Databricks terms). Only used
+# when neither the schema nor the catalog has a storage_root; the convention is a
+# catalog-level storage_root of s3://lakehouse/managed/<catalog> set over REST at
+# create time (the UI can't). Fallback path for managed tables is
+# s3://lakehouse/managed/__unitystorage/tables/<table_id>; managed volumes have no
+# fallback and fail without a catalog/schema root. Marked deprecated upstream but
+# still wired in StagingTableRepository (0.6.0). External tables are unaffected;
+# convention is s3://lakehouse/external/<catalog>/<schema>/<table>.
+storage-root.tables=s3://lakehouse/managed

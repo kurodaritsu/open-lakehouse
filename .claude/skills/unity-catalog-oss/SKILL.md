@@ -123,6 +123,40 @@ UC OSS's write story is partial and format-specific. What was actually tested:
   a non-null `s3.sessionToken.0` (any placeholder) or the bucket won't load
   and credential vending fails with "S3 bucket configuration not found."
 
+## Storage convention (since 2026-09-20)
+
+Same three-tier model as Databricks managed storage (schema > catalog > server default):
+
+- **Catalog-level `storage_root` is the tier we use**: `s3://lakehouse/managed/<catalog>`. Managed
+  tables and managed volumes then land at
+  `s3://lakehouse/managed/<catalog>/__unitystorage/catalogs/<catalog_id>/{tables,volumes}/<id>`.
+  `unity` and `example` are set up this way.
+- **Server default** `storage-root.tables=s3://lakehouse/managed` (`server.properties`) is the
+  safety net for catalogs created without a `storage_root` (UC UI has no field for it): managed
+  tables go to `s3://lakehouse/managed/__unitystorage/tables/<table_id>`; managed volumes fail
+  there (`FAILED_PRECONDITION`, no `storage-root.volumes` exists). So: create catalogs over REST
+  with `storage_root`, not from the UI.
+- Schemas: create them anywhere (UI, Spark `CREATE SCHEMA`, REST); they inherit the catalog root.
+  A schema-level `storage_root` is possible over REST but not part of the convention.
+- **External tables**: `s3://lakehouse/external/<catalog>/<schema>/<table>`, passed as `LOCATION` /
+  `.option("path", ...)`. Never register a table at a parent prefix; UC rejects anything nested
+  under an existing table path afterwards.
+- `storage_root` is set at create time only (`UpdateCatalog`/`UpdateSchema` don't carry it), and
+  the Spark connector ignores `CREATE SCHEMA ... LOCATION`.
+- Managed tables use the catalogManaged protocol (reader v3 / writer v7, column mapping, DVs, row
+  tracking). Other engines must go through the UC Delta API to find the path and need to support
+  those features. `DROP TABLE` on a managed table removes only the catalog entry; UC OSS's S3
+  delete is a no-op, so the files under `managed/` stay until removed by hand.
+- History: `unity.common.us_states_metadata` and `example.mnist.images` were moved under
+  `external/`; both catalogs were recreated to attach the `storage_root`. All ids changed.
+
+Create a catalog the convention way:
+
+```bash
+curl -X POST http://localhost:8081/api/2.1/unity-catalog/catalogs -H 'Content-Type: application/json' \
+  -d '{"name":"<catalog>","storage_root":"s3://lakehouse/managed/<catalog>"}'
+```
+
 ## 0.6.0 notes (bumped 2026-09-20 from 0.4.1; connector 0.3.0 -> 0.6.0, Delta 4.2.0 -> 4.4.0)
 
 - Connector artifact is per Spark version since 0.5.0: `unitycatalog-spark_4.1_2.13`. Runtime deps
