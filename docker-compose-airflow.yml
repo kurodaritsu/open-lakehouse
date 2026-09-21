@@ -15,6 +15,13 @@ x-airflow-common:
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     # Airflow 3.x uses API server instead of webserver
     AIRFLOW__API__PORT: 8085
+    # Host network: default execution API URL (localhost:8080) lands on the
+    # SeaweedFS volume server, so every scheduled task dies on its first call.
+    AIRFLOW__API__BASE_URL: http://localhost:8085
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://localhost:8085/execution/
+    # Scheduler and api-server each auto-generate a JWT secret when unset, so
+    # task-to-API calls fail with "Signature verification failed".
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW_JWT_SECRET:?set AIRFLOW_JWT_SECRET in .env}
     # Airflow 3 default auth is SimpleAuthManager: users are `name:role`, and
     # passwords come from a JSON file that airflow-init writes (shared via the
     # ./config/airflow mount). No `airflow users` CLI exists anymore.
