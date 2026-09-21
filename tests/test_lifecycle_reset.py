@@ -791,8 +791,14 @@ class TestSharingQuiescedOnReset:
 
     def test_sharing_not_in_stop_all_validset(self):
         body = _func_body("cmd_stop")
-        assert "mlflow|notebooks)" in body  # shared valid-set unchanged
-        assert "mlflow|notebooks|sharing)" not in body  # not appended to stop-all
+        # The shared valid-set (the no-op arm that lets `stop all` fall through)
+        # still lists the core services. Match on the core run rather than a
+        # trailing token so this survives other opt-in services being appended
+        # to the alternation (e.g. dashboard).
+        assert "mlflow|notebooks" in body  # shared valid-set core intact
+        # sharing is a standalone early-return arm, never folded into a stop-all
+        # alternation — so it must never appear joined by a pipe anywhere.
+        assert "|sharing" not in body  # not appended to stop-all
 
     def test_certs_volume_still_never(self):
         body = _func_body("reset_volume_mode")
