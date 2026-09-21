@@ -501,6 +501,7 @@ cmd_status_json() {
     local airflow_sched=$(is_container_running "$(resolve_container_name airflow-scheduler)" && echo "true" || echo "false")
     local mlflow_ok=$(is_container_running "$(resolve_container_name mlflow)" && echo "true" || echo "false")
     local sharing_ok=$(is_container_running "$(resolve_container_name delta-sharing)" && echo "true" || echo "false")
+    local dashboard_ok=$(is_container_running "$(resolve_container_name dashboard)" && echo "true" || echo "false")
 
     cat <<EOF
 {
@@ -510,6 +511,7 @@ cmd_status_json() {
     "seaweedfs": $s3_ok,
     "unity_catalog": $uc_ok,
     "mlflow": $mlflow_ok,
+    "dashboard": $dashboard_ok,
     "delta_sharing": $sharing_ok
   },
   "spark": {
@@ -579,11 +581,14 @@ cmd_status_human() {
 
     echo -e "\n${YELLOW}Delta Sharing (opt-in):${NC}"
     check_container "$(resolve_container_name delta-sharing)" || true
+    echo -e "\n${YELLOW}Dashboard (optional, opt-in — not started by 'start all'):${NC}"
+    check_container "$(resolve_container_name dashboard)" && check_service dashboard 3000 "Dashboard UI" || true
 
     echo -e "\n${YELLOW}Ports:${NC}"
     echo "  PostgreSQL:       5432"
     echo "  SeaweedFS:        8333"
     echo "  Unity Catalog:    8081 (REST API + Iceberg endpoint)"
+    echo "  Unity Catalog UI: 3001 (web UI)"
     echo "  Spark 4.1:        7078, 8082 (UI), 8083 (Worker UI)"
     echo "  Spark Connect:    15002 (gRPC)"
     echo "  Kafka:            9092"
@@ -591,6 +596,7 @@ cmd_status_human() {
     echo "  Airflow:          8085 (UI)"
     echo "  MLflow:           5000 (Tracking), 5001 (AI Gateway)"
     echo "  Delta Sharing:    8443 (HTTPS, opt-in via 'share')"
+    echo "  Dashboard:        3000 (optional, read-only viewer)"
 
     echo -e "\n${YELLOW}Configurations:${NC}"
     echo "  Storage:         docker-compose-storage.yml"
@@ -600,6 +606,7 @@ cmd_status_human() {
     echo "  Airflow:         docker-compose-airflow.yml"
     echo "  MLflow:          docker-compose-mlflow.yml"
     echo "  Delta Sharing:   docker-compose-sharing.yml"
+    echo "  Dashboard:       docker-compose-dashboard.yml"
     echo "  Spark conf:      config/spark/spark-defaults.conf"
 }
 
@@ -724,6 +731,17 @@ check_ports_for_service() {
                 has_conflicts=1
             else
                 echo -e "  ${GREEN}✓${NC} Port 8333 (SeaweedFS S3) available"
+            fi
+            ;;
+    esac
+
+    case $service in
+        dashboard)
+            if ! check_port_available 3000 "$(resolve_container_name dashboard)"; then
+                echo -e "  ${RED}✗${NC} Port 3000 (Dashboard) blocked by another process"
+                has_conflicts=1
+            else
+                echo -e "  ${GREEN}✓${NC} Port 3000 (Dashboard) available"
             fi
             ;;
     esac
@@ -864,10 +882,28 @@ cmd_start() {
     esac
 
     case $service in
-        storage|spark|kafka|all|unity-catalog|uc|airflow|mlflow|notebooks)
+        dashboard)
+            # Opt-in only (deliberately NOT part of `start all` — D8 neutrality: a
+            # Databricks-flavored optional service must not start with the core
+            # stack). First run builds the Next.js image; if public npm is
+            # unreachable, pass NPM_REGISTRY / NPM_STRICT_SSL as build args, e.g.
+            #   NPM_REGISTRY=<proxy> NPM_STRICT_SSL=false ./lakehouse start dashboard
+            echo -e "${YELLOW}Starting dashboard (read-only viewer)...${NC}"
+            check_ports_for_service dashboard || return 1
+            overlay_set_compose_args dashboard || return 1
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d
+            echo -e "${GREEN}Dashboard at: http://localhost:3000${NC} (first build can take a few minutes)"
+            if [ "${DASHBOARD_ALLOW_CODE_EXECUTION:-false}" = "true" ]; then
+                echo -e "${RED}WARNING: code-execution ENABLED (Pipelines/Notebooks pages, /api/jupyter-exec, /api/pipelines/run). Do NOT expose this dashboard to an untrusted network.${NC}"
+            fi
+            ;;
+    esac
+
+    case $service in
+        storage|spark|kafka|all|unity-catalog|uc|airflow|mlflow|notebooks|dashboard)
             ;;
         *)
-            echo "Usage: lakehouse start [storage|spark|kafka|airflow|unity-catalog|mlflow|notebooks|all]"
+            echo "Usage: lakehouse start [storage|spark|kafka|airflow|unity-catalog|mlflow|notebooks|dashboard|all]"
             exit 1
             ;;
     esac
@@ -952,13 +988,18 @@ cmd_stop() {
             docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down
             return 0
             ;;
+        dashboard)
+            echo -e "${YELLOW}Stopping dashboard...${NC}"
+            overlay_set_compose_args dashboard || return 1
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down
+            ;;
     esac
 
     case $service in
-        storage|spark|kafka|all|unity-catalog|uc|airflow|mlflow|notebooks)
+        storage|spark|kafka|all|unity-catalog|uc|airflow|mlflow|notebooks|dashboard)
             ;;
         *)
-            echo "Usage: lakehouse stop [storage|spark|kafka|airflow|unity-catalog|mlflow|notebooks|all]"
+            echo "Usage: lakehouse stop [storage|spark|kafka|airflow|unity-catalog|mlflow|notebooks|dashboard|all]"
             exit 1
             ;;
     esac
@@ -992,8 +1033,9 @@ cmd_logs() {
         airflow-webserver|airflow-web)    docker logs -f "$(resolve_container_name airflow-webserver)" ;;
         airflow-scheduler|airflow-sched)  docker logs -f "$(resolve_container_name airflow-scheduler)" ;;
         airflow-triggerer)                docker logs -f "$(resolve_container_name airflow-triggerer)" ;;
+        dashboard)        docker logs -f "$(resolve_container_name dashboard)" ;;
         *)
-            echo "Usage: lakehouse logs [postgres|seaweedfs|spark-master|spark-worker|spark-connect|kafka|zookeeper|unity-catalog|mlflow|airflow-webserver|airflow-scheduler|airflow-triggerer]"
+            echo "Usage: lakehouse logs [postgres|seaweedfs|spark-master|spark-worker|spark-connect|kafka|zookeeper|unity-catalog|mlflow|airflow-webserver|airflow-scheduler|airflow-triggerer|dashboard]"
             exit 1
             ;;
     esac
@@ -3000,7 +3042,7 @@ cmd_resolve() {
     local c
     for c in spark-master-41 spark-worker-41 spark-connect-41 kafka zookeeper \
              unity-catalog airflow-webserver airflow-scheduler airflow-triggerer \
-             mlflow jupyter; do
+             mlflow jupyter dashboard; do
         echo "container.${c}=$(resolve_container_name "$c")"
     done
 
@@ -3023,9 +3065,10 @@ cmd_resolve() {
     echo "port.zookeeper=$(resolve_port 2181)"
     echo "port.airflow=$(resolve_port 8085)"
     echo "port.mlflow=$(resolve_port 5000)"
+    echo "port.dashboard=$(resolve_port 3000)"
 
     local svc
-    for svc in spark41 kafka unity-catalog airflow mlflow notebooks; do
+    for svc in spark41 kafka unity-catalog airflow mlflow notebooks dashboard; do
         overlay_set_compose_args "$svc" || exit 1
         echo "compose.${svc}=${OVERLAY_COMPOSE_ARGS[*]}"
     done
@@ -3171,11 +3214,11 @@ Commands:
   preflight           Run preflight checks before starting services
   migrate [--dry-run] Run database schema migrations
   status [--json]     Show all service status (human or JSON)
-  start [service]     Start service (storage|spark|kafka|airflow|unity-catalog|mlflow|notebooks|all)
-  stop [service]      Stop service (storage|spark|kafka|airflow|unity-catalog|mlflow|notebooks|all)
+  start [service]     Start service (storage|spark|kafka|airflow|unity-catalog|mlflow|notebooks|dashboard|all)
+  stop [service]      Stop service (storage|spark|kafka|airflow|unity-catalog|mlflow|notebooks|dashboard|all)
   restart [service]   Restart service
   logs [service]      Tail logs (postgres|seaweedfs|spark-master|spark-worker|kafka|
-                                  zookeeper|unity-catalog|mlflow|airflow-*)
+                                  zookeeper|unity-catalog|mlflow|airflow-*|dashboard)
   test                Run connectivity tests
   producer            Start Kafka event producer
   consumer            Start Spark streaming consumer
