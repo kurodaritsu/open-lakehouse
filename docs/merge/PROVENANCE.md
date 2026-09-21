@@ -49,6 +49,65 @@ pattern for T-1.3, `make cache-deps` antecedents, the MinIO→SeaweedFS substitu
 
 ---
 
+## Phase 3 — Dashboard (`feat/merge-dashboard`, sibling PR)
+
+Ported the containerized-lakehouse-platform **frontend** (Next.js 15 / React 19 / TS 5.7 /
+Tailwind 3.4, `output: standalone`, Vitest 3.0) into `dashboard/`, with its Vitest suite from
+CP `tests/frontend/` → `dashboard/tests/`. The verbatim import is one commit (CP-attributed
+`Co-authored-by` trailers: Charlotte Blankenberg); the repoint, the T-3.7 fix, and the D6
+feature flag are separate commits so the risky diff reads on its own.
+
+Source → destination:
+
+| CP source | open-lakehouse | Reworking |
+|---|---|---|
+| `frontend/` | `dashboard/` | verbatim import, then repoint |
+| `frontend/src/app/api/minio/[...path]` | `dashboard/src/app/api/storage/[...path]` | renamed; `MINIO_URL`→`S3_ENDPOINT` (`seaweedfs:8333`) |
+| (new) | `dashboard/src/app/api/health/storage` | HEAD-bucket probe (SeaweedFS has no `/minio/health/live`) |
+| (new) | `dashboard/src/lib/features.ts`, `src/app/api/features`, `src/components/code-exec-guard.tsx` | D6 feature-flag plumbing |
+| `tests/frontend/**` | `dashboard/tests/**` | verbatim; vitest `include` repointed to `./tests/**` |
+
+Reworkings of note:
+- **Repoint (T-3.2/3.3/3.4):** MinIO→SeaweedFS (`seaweedfs:8333`), `mlflow-server:5000`,
+  `unity-catalog:8080`; bucket `lakehouse-data`→`${S3_BUCKET:-lakehouse}`; client "open UI"
+  links → host ports (UC 8081, MLflow 5000, Spark UI 8082, Jupyter 8889, Sharing 8443);
+  MinIO-console links dropped (SeaweedFS has no console).
+- **T-3.7 (security):** `POST /api/pipelines` containment gained a trailing-separator
+  boundary (`isInsidePipelinesDir`), closing the sibling-dir escape a bare
+  `startsWith(base)` admitted. CP's own test that asserted `../../../etc/passwd` was allowed
+  is inverted (F-08).
+- **D6 / T-3.8:** the code-execution / write routes and the Pipelines + Notebooks pages ship
+  **disabled** behind `DASHBOARD_ALLOW_CODE_EXECUTION` (default false), a documented demo
+  toggle with loud warnings when enabled.
+- **Neutrality (D8):** separate `docker-compose-dashboard.yml`, opt-in CLI arm, never started
+  by `start all`. The sharing page's "external access" section was genericized (no
+  cloudflared / tunnel specifics; `make share*` → `./lakehouse share *`).
+
+## Phase 4 — Delta Sharing (`feat/merge-sharing`)
+
+**Branch base:** `feat/merge-sharing` is cut from the PR #13 trunk
+`feat/net-bridge-conversion` @ `f72ff2f` (per `docs/merge/PR-fan-strategy.md`).
+
+Ported from the containerized-lakehouse platform `docker/delta-sharing/` (the OpenSharing
+reference server + `url-rewriter-proxy.py` + configs) and `tests/docker/test_url_rewriter.py`,
+rewritten for the open-lakehouse stack. The verbatim import commit carries `Co-authored-by`
+trailers to the CP authors; the SeaweedFS adaptation is Isaac's.
+
+| CP source | Ported to | Key reworking |
+|---|---|---|
+| `docker/delta-sharing/*` | `docker/delta-sharing/*` | Verbatim import (normalized to repo style: black/ruff), then repointed. |
+| MinIO endpoint `minio:9000` | `seaweedfs:8333` | `server.yaml` hadoopConf + `core-site.xml` (fs.s3a/fs.s3/fs.s3n). |
+| CP env/placeholders `MINIO_ENDPOINT`, `MINIO_PUBLIC_SCHEME`, `__MINIO_*__` | `S3_PUBLIC_ENDPOINT`, `S3_PUBLIC_SCHEME`, `__S3_*__` | Matches the `seaweedfs-ops` skill; no MinIO exists here. |
+| CP shared tables (notebook-produced retail-gold + streaming/crypto_rates on `lakehouse-data`) | `sales_by_region`, `daily_revenue` on `s3a://lakehouse/warehouse/sharing/` | Replaced with a **self-contained seed** (`scripts/sharing/seed_shared_tables.py`) writing path-based Delta at fixed prefixes — verifiable in isolation, no notebook dependency. |
+| CP public-endpoint-first sharing (`scripts/start-sharing.sh`) | **local-first** (`S3_PUBLIC_ENDPOINT=localhost:8333`) | The `./lakehouse share` CLI serves locally out of the box; a public HTTPS endpoint is an override, and how it's exposed is out of scope for this repo. |
+| CP `docker-compose.yml` delta-sharing service | `docker-compose-sharing.yml` | Bridge network; loopback-bound 8443 (D6); no cross-file `depends_on`. |
+
+The upstream **T-4.8** presigned-URL signer bug (`delta-io/delta-sharing#753`, fix PR `#965`
+stalled) — the reason the re-signing proxy exists — is documented in the `delta-sharing` skill.
+
+**Not in this PR (deferred follow-up):** folding the CP Delta Sharing *notebooks* (T-5.4) into
+`demos/delta-sharing/` — that lands after both this PR and the Demos PR merge.
+
 ## Phase 5 — Demos (`feat/merge-demos-docs`)
 
 **Branch base:** `feat/merge-demos-docs` is cut from the PR #13 trunk
