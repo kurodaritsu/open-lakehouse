@@ -1,14 +1,22 @@
+# On the shared lakehouse-network bridge. The master binds AND advertises --host,
+# so it has to be the container's own bridge IP (never 0.0.0.0, or workers get
+# 0.0.0.0 back as the master address). Worker and Connect reach the master as
+# spark-master-41; each exports SPARK_LOCAL_IP so executor/driver RPC advertises
+# a reachable address. Ported from upstream open-lakehouse#13.
+# SPARK_PUBLIC_DNS only feeds the web UI links; the bridge IP there isn't
+# browsable, so point it at the host (set it in .env for LAN browsing).
 services:
   spark-master-41:
     image: apache/spark:4.1.0-scala2.13-java21-python3-r-ubuntu
     container_name: spark-master-41
-    network_mode: "host"
     env_file: .env
     environment:
-      - SPARK_LOCAL_IP=127.0.0.1
-      - SPARK_MASTER_HOST=127.0.0.1
       - SPARK_MASTER_PORT=7078
+      - SPARK_PUBLIC_DNS=${SPARK_PUBLIC_DNS:-localhost}
       - SPARK_MASTER_WEBUI_PORT=8082
+    ports:
+      - "7078:7078"
+      - "8082:8082"
     volumes:
       - spark-data:/opt/spark-data
       - ./config/spark:/opt/spark/conf
@@ -17,12 +25,15 @@ services:
       - ./scripts:/scripts
       - ./ivy-cache:/root/.ivy2
       - ./data:/data
+    networks:
+      - lakehouse-network
     post_start:
       - command: bash -c "mkdir -p /opt/spark-data/logs; chown -R 185 /opt/spark-data; chmod -R g+w /opt/spark-data; chmod g+s /opt/spark-data"
         user: root
     command: >
       bash -c "
-        /opt/spark/sbin/start-master.sh --port 7078 --webui-port 8082 &&
+        export SPARK_LOCAL_IP=$$(hostname -i | tr ' ' '\n' | grep -vE '^127\.' | head -1);
+        /opt/spark/sbin/start-master.sh --host $$SPARK_LOCAL_IP --port 7078 --webui-port 8082 &&
         tail -f /opt/spark/logs/*
         "
 
@@ -30,14 +41,15 @@ services:
     image: apache/spark:4.1.0-scala2.13-java21-python3-r-ubuntu
     container_name: spark-worker-41
     env_file: .env
-    network_mode: "host"
     # Podman defaults to 2048 pids per container; each idle executor holds
     # ~500-700 threads (S3A pools, netty), so 3 executors + a wide
     # aggregate trip "unable to create native thread".
     pids_limit: 8192
     environment:
-      - SPARK_LOCAL_IP=127.0.0.1
       - SPARK_WORKER_WEBUI_PORT=8083
+      - SPARK_PUBLIC_DNS=${SPARK_PUBLIC_DNS:-localhost}
+    ports:
+      - "8083:8083"
     volumes:
       - spark-data:/opt/spark-data
       - ./config/spark:/opt/spark/conf
@@ -45,13 +57,16 @@ services:
       - ./jars:/opt/spark/jars-extra
       - ./scripts:/scripts
       - ./data:/data
+    networks:
+      - lakehouse-network
     post_start:
       - command: bash -c "mkdir -p /opt/spark-data/logs; chown -R 185 /opt/spark-data; chmod -R g+w /opt/spark-data; chmod g+s /opt/spark-data"
         user: root
     command: >
       bash -c "
+        export SPARK_LOCAL_IP=$$(hostname -i | tr ' ' '\n' | grep -vE '^127\.' | head -1);
         sleep 5 &&
-        /opt/spark/sbin/start-worker.sh spark://127.0.0.1:7078 --webui-port 8083 &&
+        /opt/spark/sbin/start-worker.sh spark://spark-master-41:7078 --webui-port 8083 &&
         tail -f /opt/spark/logs/*
         "
 
@@ -62,14 +77,16 @@ services:
     image: apache/spark:4.1.0-scala2.13-java21-python3-r-ubuntu
     container_name: spark-connect-41
     env_file: .env
-    network_mode: "host"
     # Podman defaults to 2048 pids per container; each idle executor holds
     # ~500-700 threads (S3A pools, netty), so 3 executors + a wide
     # aggregate trip "unable to create native thread".
     pids_limit: 8192
     environment:
-      - SPARK_LOCAL_IP=127.0.0.1
       - SPARK_NO_DAEMONIZE=1
+      - SPARK_PUBLIC_DNS=${SPARK_PUBLIC_DNS:-localhost}
+    ports:
+      - "15002:15002"   # Spark Connect gRPC
+      - "4040:4040"     # driver (jobs) UI
     volumes:
       - spark-data:/opt/spark-data
       - ./config/spark:/opt/spark/conf
@@ -77,14 +94,17 @@ services:
       - ./scripts:/scripts
       - ./data:/data
       - ./ivy-cache:/root/.ivy2
+    networks:
+      - lakehouse-network
     depends_on:
       - spark-master-41
       - spark-worker-41
     command: >
       bash -c "
+        export SPARK_LOCAL_IP=$$(hostname -i | tr ' ' '\n' | grep -vE '^127\.' | head -1);
         sleep 10 &&
         /opt/spark/sbin/start-connect-server.sh \
-          --master spark://127.0.0.1:7078 \
+          --master spark://spark-master-41:7078 \
           --conf spark.connect.grpc.binding.port=15002 \
           --conf spark.connect.grpc.binding.host=0.0.0.0
         "
@@ -94,3 +114,7 @@ volumes:
     driver: local
   spark-logs:
     driver: local
+
+networks:
+  lakehouse-network:
+    driver: bridge

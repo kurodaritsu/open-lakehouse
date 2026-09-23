@@ -2,8 +2,9 @@
 # ==================================================================
 # Start: ./lakehouse start infra   (or: docker compose -f docker-compose-infra.yml up -d)
 #
-# Both run on the host network so the rest of the stack keeps reaching them at
-# host.docker.internal / localhost:5432 and :8333 exactly as .env already says.
+# Both sit on the shared lakehouse-network bridge under the aliases `postgres` /
+# `seaweedfs` (upstream's service names), and publish their ports so host clients
+# and the remaining host-mode services keep using localhost:5432 / :8333.
 # Replaces the "install Postgres + weed on the host" step in docs/getting-started.
 #
 # Container names carry a lakehouse- prefix so they don't collide with other
@@ -17,7 +18,12 @@ services:
     # collation version mismatch. Enable per-db with `CREATE EXTENSION vector`.
     image: docker.io/pgvector/pgvector:pg18-trixie
     container_name: lakehouse-postgres
-    network_mode: "host"
+    ports:
+      - "5432:5432"
+    networks:
+      lakehouse-network:
+        aliases:
+          - postgres
     environment:
       POSTGRES_USER: "${POSTGRES_USER:?set in .env}"
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set in .env}"
@@ -34,8 +40,16 @@ services:
   seaweedfs:
     image: docker.io/chrislusf/seaweedfs:4.47
     container_name: lakehouse-seaweedfs
-    network_mode: "host"
     # master 9333, volume 8080, filer 8888, S3 8333. Unity Catalog publishes 8081 for this reason.
+    ports:
+      - "9333:9333"
+      - "8080:8080"
+      - "8888:8888"
+      - "8333:8333"
+    networks:
+      lakehouse-network:
+        aliases:
+          - seaweedfs
     command: >
       server -s3 -dir=/data -ip=localhost -ip.bind=0.0.0.0
       -master.port=9333 -volume.port=8080 -filer.port=8888 -s3.port=8333
@@ -58,3 +72,7 @@ volumes:
     driver: local
   seaweed-data:
     driver: local
+
+networks:
+  lakehouse-network:
+    driver: bridge
