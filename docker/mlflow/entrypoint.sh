@@ -79,4 +79,5 @@ exec mlflow server \
     --port 5000 \
     --workers "${MLFLOW_WORKERS:-4}" \
     --backend-store-uri "postgresql://${MLFLOW_PG_USER}:${MLFLOW_PG_PASS}@${PG_HOST}:${PG_PORT}/${MLFLOW_PG_DB}" \
-    --default-artifact-root "${MLFLOW_ARTIFACTS_DESTINATION:-s3://lakehouse/mlflow-artifacts}"
+    --default-artifact-root "${MLFLOW_ARTIFACTS_DESTINATION:-s3://lakehouse/mlflow-artifacts}" \
+    ${MLFLOW_ALLOWED_HOSTS:+--allowed-hosts "$MLFLOW_ALLOWED_HOSTS"}

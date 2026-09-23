@@ -16,9 +16,10 @@ x-airflow-common:
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     # Airflow 3.x uses API server instead of webserver
     AIRFLOW__API__PORT: 8085
-    # Default execution API URL is localhost:8080, which isn't the api-server;
-    # point task runners at the api-server container on the bridge.
-    AIRFLOW__API__BASE_URL: http://airflow-webserver:8085
+    # BASE_URL is browser-facing (log links, login redirects), so it has to be an
+    # address the browser can reach; set AIRFLOW_BASE_URL in .env for LAN access.
+    # Task runners use the execution API over the bridge instead.
+    AIRFLOW__API__BASE_URL: ${AIRFLOW_BASE_URL:-http://localhost:8085}
     AIRFLOW__CORE__EXECUTION_API_SERVER_URL: http://airflow-webserver:8085/execution/
     # Scheduler and api-server each auto-generate a JWT secret when unset, so
     # task-to-API calls fail with "Signature verification failed".
@@ -32,8 +33,6 @@ x-airflow-common:
     # Spark connection settings
     SPARK_MASTER_41: spark://spark-master-41:7078
     SPARK_REMOTE: sc://spark-connect-41:15002
-    # Kafka settings
-    KAFKA_BOOTSTRAP_SERVERS: localhost:9092
     # S3/SeaweedFS settings
     AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY}
     AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY}
