@@ -129,3 +129,7 @@ jars/uc-ext/
 
 # Local files and data
 **/*.local.*
+
+# Locally deployed DAGs. Not really applicable here in this repo as this is focused more
+# on deployment rather than the pipelines
+dags/
