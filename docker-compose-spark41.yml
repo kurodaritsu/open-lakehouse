@@ -7,13 +7,27 @@
 # browsable, so point it at the host (set it in .env for LAN browsing).
 services:
   spark-master-41:
-    image: apache/spark:4.1.0-scala2.13-java21-python3-r-ubuntu
+    # Stock Spark 4.1 + MLflow client (docker/spark/Dockerfile); one image for all three.
+    image: open-lakehouse/spark:4.1.0
+    build:
+      context: .
+      dockerfile: docker/spark/Dockerfile
     container_name: spark-master-41
     env_file: .env
     environment:
       - SPARK_MASTER_PORT=7078
       - SPARK_PUBLIC_DNS=${SPARK_PUBLIC_DNS:-localhost}
       - SPARK_MASTER_WEBUI_PORT=8082
+      # MLflow client: `spark_udf` executors pull `models:/` from UC OSS and the
+      # artifacts from SeaweedFS. sitecustomize patches the S3 region lookup
+      # SeaweedFS can't answer (config/mlflow-client/sitecustomize.py).
+      - MLFLOW_TRACKING_URI=http://mlflow-server:5000
+      - MLFLOW_REGISTRY_URI=uc:http://unity-catalog:8080
+      - PYTHONPATH=/opt/mlflow-client
+      - AWS_ENDPOINT_URL_S3=http://seaweedfs:8333
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=${S3_ACCESS_KEY}
+      - AWS_SECRET_ACCESS_KEY=${S3_SECRET_KEY}
     ports:
       - "7078:7078"
       - "8082:8082"
@@ -25,6 +39,7 @@ services:
       - ./scripts:/scripts
       - ./ivy-cache:/root/.ivy2
       - ./data:/data
+      - ./config/mlflow-client:/opt/mlflow-client:ro
     networks:
       - lakehouse-network
     post_start:
@@ -38,7 +53,11 @@ services:
         "
 
   spark-worker-41:
-    image: apache/spark:4.1.0-scala2.13-java21-python3-r-ubuntu
+    # Stock Spark 4.1 + MLflow client (docker/spark/Dockerfile); one image for all three.
+    image: open-lakehouse/spark:4.1.0
+    build:
+      context: .
+      dockerfile: docker/spark/Dockerfile
     container_name: spark-worker-41
     env_file: .env
     # Podman defaults to 2048 pids per container; each idle executor holds
@@ -47,6 +66,16 @@ services:
     pids_limit: 8192
     environment:
       - SPARK_WORKER_WEBUI_PORT=8083
+      # MLflow client: `spark_udf` executors pull `models:/` from UC OSS and the
+      # artifacts from SeaweedFS. sitecustomize patches the S3 region lookup
+      # SeaweedFS can't answer (config/mlflow-client/sitecustomize.py).
+      - MLFLOW_TRACKING_URI=http://mlflow-server:5000
+      - MLFLOW_REGISTRY_URI=uc:http://unity-catalog:8080
+      - PYTHONPATH=/opt/mlflow-client
+      - AWS_ENDPOINT_URL_S3=http://seaweedfs:8333
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=${S3_ACCESS_KEY}
+      - AWS_SECRET_ACCESS_KEY=${S3_SECRET_KEY}
       - SPARK_PUBLIC_DNS=${SPARK_PUBLIC_DNS:-localhost}
     ports:
       - "8083:8083"
@@ -57,6 +86,7 @@ services:
       - ./jars:/opt/spark/jars-extra
       - ./scripts:/scripts
       - ./data:/data
+      - ./config/mlflow-client:/opt/mlflow-client:ro
     networks:
       - lakehouse-network
     post_start:
@@ -74,7 +104,11 @@ services:
   # Required for SDP (pyspark.pipelines uses Connect internally) and the default
   # transport for client demos. Exposes gRPC on port 15002.
   spark-connect-41:
-    image: apache/spark:4.1.0-scala2.13-java21-python3-r-ubuntu
+    # Stock Spark 4.1 + MLflow client (docker/spark/Dockerfile); one image for all three.
+    image: open-lakehouse/spark:4.1.0
+    build:
+      context: .
+      dockerfile: docker/spark/Dockerfile
     container_name: spark-connect-41
     env_file: .env
     # Podman defaults to 2048 pids per container; each idle executor holds
@@ -83,6 +117,16 @@ services:
     pids_limit: 8192
     environment:
       - SPARK_NO_DAEMONIZE=1
+      # MLflow client: `spark_udf` executors pull `models:/` from UC OSS and the
+      # artifacts from SeaweedFS. sitecustomize patches the S3 region lookup
+      # SeaweedFS can't answer (config/mlflow-client/sitecustomize.py).
+      - MLFLOW_TRACKING_URI=http://mlflow-server:5000
+      - MLFLOW_REGISTRY_URI=uc:http://unity-catalog:8080
+      - PYTHONPATH=/opt/mlflow-client
+      - AWS_ENDPOINT_URL_S3=http://seaweedfs:8333
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=${S3_ACCESS_KEY}
+      - AWS_SECRET_ACCESS_KEY=${S3_SECRET_KEY}
       - SPARK_PUBLIC_DNS=${SPARK_PUBLIC_DNS:-localhost}
     ports:
       - "15002:15002"   # Spark Connect gRPC
@@ -93,6 +137,7 @@ services:
       - ./jars:/opt/spark/jars-extra
       - ./scripts:/scripts
       - ./data:/data
+      - ./config/mlflow-client:/opt/mlflow-client:ro
       - ./ivy-cache:/root/.ivy2
     networks:
       - lakehouse-network

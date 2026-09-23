@@ -685,7 +685,7 @@ cmd_start() {
         spark|all)
             echo -e "${YELLOW}Starting Spark 4.1 (port $spark_port, Connect on $(get_spark_connect_port))...${NC}"
             overlay_set_compose_args spark41 || return 1
-            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d
+            docker compose "${OVERLAY_COMPOSE_ARGS[@]}" up -d --build
             # Event-log dir on the shared volume. The compose post_start hook does this
             # under Docker, but podman-compose ignores lifecycle hooks; idempotent here.
             docker exec "$master_container" mkdir -p /opt/spark-data/logs 2>/dev/null || true
