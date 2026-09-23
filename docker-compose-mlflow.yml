@@ -72,18 +72,22 @@ services:
       - host.docker.internal:host-gateway
     environment:
       - MLFLOW_TRACKING_URI=http://mlflow-server:5000
+      # Registered models go to UC OSS; sitecustomize patches the S3 region
+      # lookup SeaweedFS can't answer (config/mlflow-client/sitecustomize.py).
+      - MLFLOW_REGISTRY_URI=uc:http://unity-catalog:8080
       - SPARK_MASTER=spark://spark-master-41:7078
       # Full OSS: GPT-OSS 20B via Ollama. No API keys needed.
       - LLM_MODEL=gpt-oss:20b
       - LLM_PROVIDER=openai
       - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434/v1}
-      - PYTHONPATH=/opt/spark/python:/opt/spark/python/lib/py4j-0.10.9.9-src.zip
+      - PYTHONPATH=/opt/mlflow-client:/opt/spark/python:/opt/spark/python/lib/py4j-0.10.9.9-src.zip
       - SPARK_HOME=/opt/spark
     volumes:
       - ./config/spark:/opt/spark/conf
       - ./jars:/opt/spark/jars-extra
       - ./scripts:/scripts
       - ./data:/data
+      - ./config/mlflow-client:/opt/mlflow-client:ro
     command: >
       bash -c "
         mkdir -p /opt/spark-data/logs &&

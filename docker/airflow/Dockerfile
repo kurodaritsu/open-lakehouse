@@ -36,6 +36,13 @@ RUN pip install --no-cache-dir \
     apache-airflow-providers-http==5.6.3 \
     "pyspark[connect]==4.1.0"
 
+# MLflow client for DAG tasks, pinned to the tracking server version. Skinny
+# because full mlflow drags in its server deps (SQLAlchemy/alembic), which
+# would fight Airflow's own. boto3 is for the S3 artifact uploads.
+RUN pip install --no-cache-dir \
+    "mlflow-skinny==3.13.0" \
+    boto3
+
 # Create directories
 RUN mkdir -p /opt/airflow/dags /opt/airflow/logs /opt/airflow/config
 

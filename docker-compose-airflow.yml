@@ -37,6 +37,12 @@ x-airflow-common:
     AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY}
     AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY}
     AWS_ENDPOINT_URL: http://seaweedfs:8333
+    # MLflow: runs go to the tracking server, registered models to UC OSS.
+    # sitecustomize on PYTHONPATH patches MLflow's S3 region lookup, which
+    # SeaweedFS can't answer (see config/mlflow-client/sitecustomize.py).
+    MLFLOW_TRACKING_URI: http://mlflow-server:5000
+    MLFLOW_REGISTRY_URI: uc:http://unity-catalog:8080
+    PYTHONPATH: /opt/mlflow-client
   volumes:
     - ./dags:/opt/airflow/dags
     - ./logs/airflow:/opt/airflow/logs
@@ -44,6 +50,7 @@ x-airflow-common:
     - ./scripts:/opt/airflow/scripts
     - ./jars:/opt/airflow/jars
     - ./data:/opt/airflow/data
+    - ./config/mlflow-client:/opt/mlflow-client:ro
   networks:
     - lakehouse-network
   # Rootless podman: map the host user to the image's airflow uid so the bind
