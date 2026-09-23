@@ -1430,13 +1430,12 @@ reset_discover_volumes() {
 # comma-list of modes, or "never" for the explicit never-destroy list.
 reset_volume_mode() {
     case "$1" in
-        mlflow-data)           echo "metadata,all" ;;  # tracking state (kept by --keep-mlflow)
         uc-data)               echo "metadata,all" ;;  # catalog state (if ever mounted)
         uc-logs)               echo "never" ;;         # diagnostics — never destroyed
         # Infra backing stores. Reset already drops/recreates the databases and
         # empties the bucket through Postgres/S3; the volumes themselves stay.
         pg-data|seaweed-data)  echo "never" ;;
-        spark-data|spark-logs) echo "data,all" ;;      # job scratch + event logs
+        spark-data)            echo "data,all" ;;      # job scratch + event logs
         *)                     echo "data,all" ;;      # default: data-plane scratch
     esac
     return 0
@@ -1577,10 +1576,6 @@ reset_emit_plan() {
         vmode=$(reset_volume_mode "$v")
         if [ "$vmode" = "never" ]; then
             echo "PLAN target=volume name=${v} action=preserve reason=never-destroy"
-            continue
-        fi
-        if [ "$keep_mlflow" = "true" ] && [ "$v" = "mlflow-data" ]; then
-            echo "PLAN target=volume name=${v} action=preserve reason=keep-mlflow"
             continue
         fi
         case ",${vmode}," in
@@ -1794,12 +1789,11 @@ reset_delete_metadata() {
         echo -e "${YELLOW}Resetting database ${eff}...${NC}"
         pg_drop_recreate "$eff" || return 1
     done
-    # Metadata-owned named volumes (mlflow-data unless --keep-mlflow, uc-data).
+    # Metadata-owned named volumes (uc-data).
     local v vmode vname
     for v in $(reset_discover_volumes); do
         vmode=$(reset_volume_mode "$v")
         case ",${vmode}," in *",metadata,"*) ;; *) continue ;; esac
-        [ "$keep_mlflow" = "true" ] && [ "$v" = "mlflow-data" ] && continue
         vname=$(reset_effective_volume "$v")
         docker volume rm "$vname" >/dev/null 2>&1 || echo -e "  ${YELLOW}!${NC} could not remove volume $vname (in use or absent)" >&2
     done
@@ -1859,7 +1853,7 @@ reset_delete_data() {
         fi
     fi
 
-    # Data-plane named volumes (spark-data, spark-logs).
+    # Data-plane named volumes (spark-data).
     local v vmode vname
     for v in $(reset_discover_volumes); do
         vmode=$(reset_volume_mode "$v")

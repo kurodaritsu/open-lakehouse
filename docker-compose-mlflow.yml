@@ -48,7 +48,6 @@ services:
       MLFLOW_ALLOWED_HOSTS: "${MLFLOW_ALLOWED_HOSTS:-localhost,localhost:*,127.0.0.1,127.0.0.1:*,mlflow-server,mlflow-server:*,192.168.*,10.*,172.*}"
     volumes:
       - ./config/mlflow:/config:ro
-      - mlflow-data:/mlflow
     networks:
       - lakehouse-network
     healthcheck:
@@ -93,9 +92,6 @@ services:
         tail -f /dev/null
       "
     restart: unless-stopped
-
-volumes:
-  mlflow-data:
 
 networks:
   lakehouse-network:
