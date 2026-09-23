@@ -25,14 +25,16 @@ ENV PATH="${SPARK_HOME}/bin:${PATH}"
 
 USER airflow
 
-# Install Airflow providers (latest versions compatible with Airflow 3.x)
+# Install Airflow providers (latest versions compatible with Airflow 3.x).
+# pyspark[connect] pulls pandas>=2.2, pyarrow and grpcio; bare pyspark
+# leaves the Connect client unimportable inside the image.
 RUN pip install --no-cache-dir \
     apache-airflow-providers-apache-spark==5.5.0 \
     apache-airflow-providers-postgres==5.14.0 \
     apache-airflow-providers-apache-kafka==1.8.0 \
     apache-airflow-providers-docker==3.14.0 \
     apache-airflow-providers-http==5.6.3 \
-    pyspark==4.1.0
+    "pyspark[connect]==4.1.0"
 
 # Create directories
 RUN mkdir -p /opt/airflow/dags /opt/airflow/logs /opt/airflow/config
