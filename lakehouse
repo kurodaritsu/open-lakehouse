@@ -52,6 +52,8 @@ check_gnutools_on_macos() {
 port_open() {
     timeout 2 bash -c ">/dev/tcp/localhost/$1" 2>/dev/null
 }
+# wait_for_service runs its check through `bash -c`, which only sees exported functions.
+export -f port_open
 
 # Check if a command exists
 check_cmd() {
@@ -275,8 +277,9 @@ wait_for_service() {
     local attempt=1
 
     # Security: Validate check_cmd only contains safe patterns
-    # Only allow: nc, curl, docker, psql commands with safe arguments
-    if [[ ! "$check_cmd" =~ ^(nc\ -z|curl\ -s|docker\ exec|PGPASSWORD=) ]]; then
+    # Only allow: nc, curl, docker, psql commands with safe arguments, or
+    # `port_open <port>` with a numeric port
+    if [[ ! "$check_cmd" =~ ^(nc\ -z|curl\ -s|docker\ exec|PGPASSWORD=|port_open\ [0-9]+$) ]]; then
         echo -e "   ${RED}✗${NC} Invalid check command for $name"
         return 1
     fi
