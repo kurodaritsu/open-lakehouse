@@ -36,6 +36,13 @@ spark.sql.catalog.example.token           not_used
 spark.sql.catalog.example.credScopedFs.enabled    false
 spark.sql.catalog.example.renewCredential.enabled false
 
+# production — same UC server, live data products (bronze / silver / gold).
+spark.sql.catalog.production              io.unitycatalog.spark.UCSingleCatalog
+spark.sql.catalog.production.uri          http://localhost:8081
+spark.sql.catalog.production.token        not_used
+spark.sql.catalog.production.credScopedFs.enabled    false
+spark.sql.catalog.production.renewCredential.enabled false
+
 # Default Spark catalog as DeltaCatalog — Delta extension functions
 # (CREATE/INSERT/MERGE) need this even when operating on unity.* tables.
 spark.sql.catalog.spark_catalog           org.apache.spark.sql.delta.catalog.DeltaCatalog
