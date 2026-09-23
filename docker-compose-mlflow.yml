@@ -60,7 +60,9 @@ services:
     restart: unless-stopped
 
   mlflow-agent:
-    image: apache/spark:4.1.0-scala2.13-java21-python3-r-ubuntu
+    # Stack's Spark image for its Python 3.13 venv, so UDFs match the workers.
+    # Built by `./lakehouse start spark`.
+    image: open-lakehouse/spark:4.1.0
     container_name: spark-mlflow-agent
     user: root
     profiles: ["agent"]
@@ -91,7 +93,7 @@ services:
     command: >
       bash -c "
         mkdir -p /opt/spark-data/logs &&
-        pip install --quiet mlflow>=3.12 openai &&
+        uv pip install --quiet mlflow>=3.12 openai &&
         echo 'MLflow agent container ready. Using local OSS models via Ollama.' &&
         tail -f /dev/null
       "

@@ -1,5 +1,5 @@
-# Airflow 3.1.6 with Python 3.12
-FROM apache/airflow:3.1.6-python3.12
+# Airflow 3.1.6 with Python 3.13, matching the Spark workers (docker/spark/Dockerfile)
+FROM apache/airflow:3.1.6-python3.13
 
 USER root
 

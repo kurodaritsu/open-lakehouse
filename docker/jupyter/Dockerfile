@@ -5,20 +5,15 @@ FROM apache/spark:4.1.0-scala2.13-java21-python3-r-ubuntu
 
 USER root
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3-pip python3-venv \
-    && apt-get clean \
-    && rm -rf /var/lib/apt/lists/*
-
-# Use a venv to sidestep PEP 668 on newer Ubuntu base images (and to avoid
-# clobbering the base image's system-site-packages). Pin pip first so the
-# jupyterlab resolver has a modern version.
-ENV VIRTUAL_ENV=/opt/jupyter-venv
-RUN python3 -m venv "$VIRTUAL_ENV"
+# uv-managed Python 3.13 instead of the base image's 3.10, so notebook UDFs
+# match the Spark workers' version (docker/spark/Dockerfile).
+COPY --from=ghcr.io/astral-sh/uv:0.12.18 /uv /usr/local/bin/uv
+ENV UV_PYTHON_INSTALL_DIR=/opt/python \
+    VIRTUAL_ENV=/opt/jupyter-venv
+RUN uv venv --python 3.13 "$VIRTUAL_ENV"
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
 
-RUN pip install --no-cache-dir --upgrade "pip>=24.0" setuptools wheel
-RUN pip install --no-cache-dir \
+RUN uv pip install --no-cache \
       jupyterlab==4.3.0 \
       ipykernel==6.29.5 \
       pyspark==4.1.0 \
