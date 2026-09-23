@@ -36,6 +36,7 @@ services:
       MLFLOW_S3_ENDPOINT_URL: "http://localhost:8333"
       # AI Gateway config
       MLFLOW_GATEWAY_CONFIG: "/config/gateway-config.yml"
+      MLFLOW_WORKERS: "${MLFLOW_WORKERS:-4}"
     volumes:
       - ./config/mlflow:/config:ro
       - mlflow-data:/mlflow

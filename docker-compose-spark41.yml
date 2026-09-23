@@ -31,6 +31,10 @@ services:
     container_name: spark-worker-41
     env_file: .env
     network_mode: "host"
+    # Podman defaults to 2048 pids per container; each idle executor holds
+    # ~500-700 threads (S3A pools, netty), so 3 executors + a wide
+    # aggregate trip "unable to create native thread".
+    pids_limit: 8192
     environment:
       - SPARK_LOCAL_IP=127.0.0.1
       - SPARK_WORKER_WEBUI_PORT=8083
@@ -59,6 +63,10 @@ services:
     container_name: spark-connect-41
     env_file: .env
     network_mode: "host"
+    # Podman defaults to 2048 pids per container; each idle executor holds
+    # ~500-700 threads (S3A pools, netty), so 3 executors + a wide
+    # aggregate trip "unable to create native thread".
+    pids_limit: 8192
     environment:
       - SPARK_LOCAL_IP=127.0.0.1
       - SPARK_NO_DAEMONIZE=1
