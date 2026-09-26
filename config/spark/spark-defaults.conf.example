@@ -43,6 +43,13 @@ spark.sql.catalog.production.token        not_used
 spark.sql.catalog.production.credScopedFs.enabled    false
 spark.sql.catalog.production.renewCredential.enabled false
 
+# development - same UC server, dev/experimentation mirror of production.
+spark.sql.catalog.development             io.unitycatalog.spark.UCSingleCatalog
+spark.sql.catalog.development.uri         http://unity-catalog:8080
+spark.sql.catalog.development.token       not_used
+spark.sql.catalog.development.credScopedFs.enabled    false
+spark.sql.catalog.development.renewCredential.enabled false
+
 # Default Spark catalog as DeltaCatalog — Delta extension functions
 # (CREATE/INSERT/MERGE) need this even when operating on unity.* tables.
 spark.sql.catalog.spark_catalog           org.apache.spark.sql.delta.catalog.DeltaCatalog
