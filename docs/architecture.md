@@ -170,7 +170,7 @@ A `--spark-local` flag exists on the CLI as a forward-compat stub for an eventua
 | Delta | 4.4.0 | Spark 4.1 artifact (`delta-spark_4.1_2.13`) |
 | Hadoop | 3.4.1 | Bundled in Spark image |
 | AWS SDK v2 | 2.24.6 | Exact match for Hadoop 3.4.1 |
-| Airflow | 3.1.6 | Breaking changes from 2.x — see airflow-3 skill |
+| Airflow | 3.3.0 | Breaking changes from 2.x — see airflow-3 skill |
 | Unity Catalog OSS | 0.4.0 | Catalog-managed commits, Iceberg REST |
 | MLflow | 3.1 | AI Gateway needs ≥ 3.0 |
 

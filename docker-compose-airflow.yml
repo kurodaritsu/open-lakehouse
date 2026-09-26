@@ -1,7 +1,7 @@
 x-airflow-common:
   &airflow-common
   # Single image name so compose builds once instead of once per service.
-  image: open-lakehouse/airflow:3.1.6
+  image: open-lakehouse/airflow:3.3.0
   build:
     context: .
     dockerfile: docker/airflow/Dockerfile

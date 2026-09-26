@@ -4,7 +4,7 @@ Orchestrate Spark jobs, Kafka sensors, and Iceberg maintenance with Apache Airfl
 
 ## Version
 
-This setup uses **Airflow 3.1.6** with Python 3.12. See [Airflow 3.x Notes](#airflow-3x-notes) for breaking changes from 2.x.
+This setup uses **Airflow 3.3.0** with Python 3.13. See [Airflow 3.x Notes](#airflow-3x-notes) for breaking changes from 2.x.
 
 ## Architecture
 
@@ -452,7 +452,7 @@ docker exec spark-master-41 /opt/spark/bin/spark-submit --version
 
 ## Airflow 3.x Notes
 
-This setup uses Airflow 3.1.6 which has breaking changes from 2.x:
+This setup uses Airflow 3.3.0 which has breaking changes from 2.x:
 
 ### Command Changes
 | Old (2.x) | New (3.x) |
@@ -479,7 +479,7 @@ This setup uses Airflow 3.1.6 which has breaking changes from 2.x:
 | `AIRFLOW__WEBSERVER__WEB_SERVER_PORT` | `AIRFLOW__API__PORT` |
 
 ### Docker Image Notes
-- Base image: `apache/airflow:3.1.6-python3.12`
+- Base image: `apache/airflow:3.3.0-python3.13`
 - Java: **17** (for local Spark client operations)
 - Spark client: 4.1.0 included for potential local spark-submit
 

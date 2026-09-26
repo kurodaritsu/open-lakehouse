@@ -69,7 +69,7 @@ For the full deterministic runbook, see `.claude/skills/lakehouse-lifecycle/star
 - Spark 4.1.0 (Scala 2.13, Java 21)
 - Iceberg 1.10.0
 - Delta 4.4.0, artifact `delta-spark_4.1_2.13` (4.0.x breaks on Spark 4.1 — ABI mismatch). Pulls in `delta-kernel-*` 4.4.0.
-- Airflow 3.1.6
+- Airflow 3.3.0
 - Unity Catalog OSS 0.6.0 (`unitycatalog/unitycatalog:v0.6.0`). H2 metadata on the `uc-data` volume.
 - Unity Catalog Spark connector 0.6.0 (`unitycatalog-spark_4.1_2.13` + `unitycatalog-client` + `unitycatalog-hadoop`)
 - MLflow 3.13 (image base `ghcr.io/mlflow/mlflow:v3.13.0-full`)
