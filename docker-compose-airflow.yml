@@ -43,6 +43,19 @@ x-airflow-common:
     MLFLOW_TRACKING_URI: http://mlflow-server:5000
     MLFLOW_REGISTRY_URI: uc:http://unity-catalog:8080
     PYTHONPATH: /opt/mlflow-client
+    # Pipelines repo as a git DAG bundle, tracking `main`. No subdir on
+    # purpose: Airflow appends the bundle root to sys.path, so DAGs can import
+    # modules from the repo root. Token lives in the connection, not in bundle
+    # kwargs, since the config API exposes those verbatim.
+    AIRFLOW_CONN_PIPELINES_GIT: '{"conn_type": "git", "host": "${PIPELINES_GIT_URL:?set PIPELINES_GIT_URL in .env}", "password": "${PIPELINES_GIT_TOKEN:?set PIPELINES_GIT_TOKEN in .env}"}'
+    AIRFLOW__DAG_PROCESSOR__DAG_BUNDLE_CONFIG_LIST: >-
+      [{"name": "dags-folder", "classpath": "airflow.dag_processing.bundles.local.LocalDagBundle", "kwargs": {}},
+      {"name": "pipelines", "classpath": "airflow.providers.git.bundles.git.GitDagBundle",
+      "kwargs": {"git_conn_id": "pipelines_git", "tracking_ref": "main", "refresh_interval": 300}}]
+    # Pipelines default to `development` when unset; Airflow runs are prod.
+    LAKEHOUSE_CATALOG: production
+    # Pipeline config reads the S3-specific var, not `AWS_ENDPOINT_URL`.
+    AWS_ENDPOINT_URL_S3: http://seaweedfs:8333
   volumes:
     - ./dags:/opt/airflow/dags
     - ./logs/airflow:/opt/airflow/logs
