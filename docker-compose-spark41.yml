@@ -64,6 +64,11 @@ services:
     # ~500-700 threads (S3A pools, netty), so 3 executors + a wide
     # aggregate trip "unable to create native thread".
     pids_limit: 8192
+    # Hard ceiling over SPARK_WORKER_MEMORY: 2 x 8g executor heap plus JVM
+    # non-heap. memswap_limit matches so it can't spill into swap instead
+    # (podman defaults swap to 2x mem_limit).
+    mem_limit: 20g
+    memswap_limit: 20g
     environment:
       - SPARK_WORKER_WEBUI_PORT=8083
       # Cap what the worker offers; unset these, and it advertises all
