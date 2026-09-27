@@ -63,7 +63,7 @@ cd open-lakehouse
 
 cp .env.example .env       # fill in POSTGRES_*, S3_* placeholders
 ./lakehouse setup          # validate env, install deps, download ~860MB of JARs
-./lakehouse start all      # PostgreSQL 18 + SeaweedFS (S3) + Spark 4.1 master + worker + Connect
+./lakehouse start all      # PostgreSQL 18 + SeaweedFS (S3) + Spark 4.1 + Unity Catalog + Airflow
 ./lakehouse start kafka    # optional, only for the streaming demos
 ./lakehouse start unity-catalog
 ./lakehouse start mlflow

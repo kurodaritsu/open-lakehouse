@@ -634,7 +634,7 @@ check_ports_for_service() {
     esac
 
     case $service in
-        unity-catalog|uc)
+        unity-catalog|uc|all)
             if ! check_port_available 8081 "$(resolve_container_name unity-catalog)"; then
                 echo -e "  ${RED}✗${NC} Port 8081 (Unity Catalog) blocked by another process"
                 has_conflicts=1
@@ -706,7 +706,7 @@ cmd_start() {
     esac
 
     case $service in
-        unity-catalog|uc)
+        unity-catalog|uc|all)
             echo -e "${YELLOW}Starting Unity Catalog...${NC}"
             if [ ! -f "config/unity-catalog/server.properties" ]; then
                 echo -e "${YELLOW}Creating server.properties from example...${NC}"
@@ -720,7 +720,7 @@ cmd_start() {
     esac
 
     case $service in
-        airflow)
+        airflow|all)
             echo -e "${YELLOW}Starting Airflow...${NC}"
             mkdir -p logs/airflow
             overlay_set_compose_args airflow || return 1
@@ -781,7 +781,7 @@ cmd_stop() {
     esac
 
     case $service in
-        unity-catalog|uc)
+        unity-catalog|uc|all)
             echo -e "${YELLOW}Stopping Unity Catalog...${NC}"
             overlay_set_compose_args unity-catalog || return 1
             docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down
@@ -789,7 +789,7 @@ cmd_stop() {
     esac
 
     case $service in
-        airflow)
+        airflow|all)
             echo -e "${YELLOW}Stopping Airflow...${NC}"
             overlay_set_compose_args airflow || return 1
             docker compose "${OVERLAY_COMPOSE_ARGS[@]}" down

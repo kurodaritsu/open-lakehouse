@@ -42,7 +42,7 @@ Expected: `All preflight checks passed`. This verifies PostgreSQL is reachable, 
 ## Step 3 — core services (90–120s with first-run package downloads)
 
 ```bash
-./lakehouse start all          # infra (Postgres 18 + SeaweedFS) + Spark 4.1 master + worker + Connect
+./lakehouse start all          # infra (Postgres 18 + SeaweedFS) + Spark 4.1 + Unity Catalog + Airflow
 ./lakehouse start kafka        # optional, only for streaming demos (not part of `all`)
 bash scripts/tools/build-uc-ext.sh   # once per UC image version; compiles config/unity-catalog/ext -> jars/uc-ext
 ./lakehouse start unity-catalog
