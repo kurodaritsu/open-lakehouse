@@ -692,6 +692,15 @@ cmd_start() {
             # Event-log dir on the shared volume. The compose post_start hook does this
             # under Docker, but podman-compose ignores lifecycle hooks; idempotent here.
             docker exec "$master_container" mkdir -p /opt/spark-data/logs 2>/dev/null || true
+            # podman-compose drops memswap_limit, leaving the worker as much swap as
+            # mem_limit. Zero it in the cgroup directly; skipped under Docker (no
+            # .State.CgroupPath).
+            local worker_cg
+            worker_cg=$(docker inspect "$(resolve_container_name spark-worker-41)" \
+                --format '{{.State.CgroupPath}}' 2>/dev/null)
+            if [ -n "$worker_cg" ]; then
+                echo 0 > "/sys/fs/cgroup${worker_cg}/memory.swap.max" 2>/dev/null || true
+            fi
             wait_for_service "Spark Connect" "port_open $(get_spark_connect_port)" 90
             echo -e "${GREEN}Spark Connect endpoint:${NC} $(get_spark_remote)"
             ;;

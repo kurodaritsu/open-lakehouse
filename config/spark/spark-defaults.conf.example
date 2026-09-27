@@ -106,7 +106,7 @@ spark.jars  /opt/spark/jars-extra/iceberg-spark-runtime-4.0_2.13-1.10.0.jar,/opt
 # ============================================================================
 spark.driver.memory                       4g
 spark.executor.memory                     8g
-spark.executor.cores                      2
+spark.executor.cores                      4
 # Release idle executors. The Connect server is one long-lived app, so without
 # this it keeps every executor it grabbed at startup (3 x 8g) until restart.
 # Shuffle tracking stands in for the external shuffle service in standalone.
