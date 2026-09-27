@@ -66,6 +66,10 @@ services:
     pids_limit: 8192
     environment:
       - SPARK_WORKER_WEBUI_PORT=8083
+      # Cap what the worker offers; unset these, and it advertises all
+      # host RAM and cores.
+      - SPARK_WORKER_MEMORY=16g
+      - SPARK_WORKER_CORES=8
       # MLflow client: `spark_udf` executors pull `models:/` from UC OSS and the
       # artifacts from SeaweedFS. sitecustomize patches the S3 region lookup
       # SeaweedFS can't answer (config/mlflow-client/sitecustomize.py).
