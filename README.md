@@ -1,8 +1,13 @@
+> [!NOTE]
+> This repository is heavily modified to the user's use case. This repository is only used for personal git tracking purposes only, and the changes given here only applies to a specific setup. This means that this repo setting cannot guarantee that it works on your system.
+>
+> To try this repo on your own, I recommend using the upstream repository instead: https://github.com/open-lakehouse/open-lakehouse
+
 # open-lakehouse
 
-> A composable OSS lakehouse demo platform — Spark 4.1 (Connect-first), Kafka, Airflow, Iceberg, Delta, Unity Catalog OSS, MLflow. Runs locally on Docker. Deploys to AWS. Designed to be set up and torn down by an AI agent.
+> A composable OSS lakehouse demo platform - Spark 4.1 (Connect-first), Kafka, Airflow, Iceberg, Delta, Unity Catalog OSS, MLflow. Runs locally on Docker. Deploys to AWS. Designed to be set up and torn down by an AI agent.
 
-This repo is the demo-focused sibling of the upstream [lakehouse-stack](https://github.com/lisancao/lakehouse-stack). It strips the platform down to seven OSS services, ships clean AI-skill scaffolding, and uses Unity Catalog OSS as its only catalog. Demos live under `demos/` and start empty — each one follows a fixed README contract so an LLM can run any demo by reading its README.
+This repo is the demo-focused sibling of the upstream [lakehouse-stack](https://github.com/lisancao/lakehouse-stack). It strips the platform down to seven OSS services, ships clean AI-skill scaffolding, and uses Unity Catalog OSS as its only catalog. Demos live under `demos/` and start empty - each one follows a fixed README contract so an LLM can run any demo by reading its README.
 
 ## Stack
 
@@ -15,7 +20,7 @@ This repo is the demo-focused sibling of the upstream [lakehouse-stack](https://
 | Open table formats | Apache Iceberg / Delta Lake | 1.10 / 4.4.0 |
 | Catalog | Unity Catalog OSS | 0.4.x |
 | Experiment tracking | MLflow | 3.12 |
-| Object store | SeaweedFS (S3-compatible) | — |
+| Object store | SeaweedFS (S3-compatible) | - |
 | Metastore | PostgreSQL | 16 |
 
 All components are Apache-2.0 or Apache-compatible permissive licenses. See [NOTICE](NOTICE).
@@ -86,7 +91,7 @@ For the deterministic, branch-on-failure runbook an AI agent uses, see [`.claude
 
 Default CLI mode is `--spark-connect`. The Spark Connect server runs in container `spark-connect-41` (gRPC on `:15002`). Clients use `SparkSession.builder.remote("sc://localhost:15002")`.
 
-Spark Declarative Pipelines (SDP) **requires** Connect machinery — `pyspark.pipelines` uses `SparkConnectGraphElementRegistry` internally even though `spark-pipelines run` doesn't open `sc://` explicitly. Don't disable the Connect server.
+Spark Declarative Pipelines (SDP) **requires** Connect machinery - `pyspark.pipelines` uses `SparkConnectGraphElementRegistry` internally even though `spark-pipelines run` doesn't open `sc://` explicitly. Don't disable the Connect server.
 
 `--spark-local` (in-process Spark, no Docker) is a forward-compat stub today; the placeholder lives at [`demos/local-mode-spark/`](demos/local-mode-spark/). See [`docs/architecture.md`](docs/architecture.md) for the full transport story.
 
@@ -104,7 +109,7 @@ Full teardown including data: see [`.claude/skills/lakehouse-lifecycle/stop.md`]
 open-lakehouse/
 ├── lakehouse                       Top-level CLI (start/stop/status/test/migrate)
 ├── docker-compose-*.yml            One compose file per service (Infra = Postgres + SeaweedFS, Spark + Connect, Kafka, UC, MLflow, Airflow, Notebooks)
-├── config/                         Spark, Unity Catalog, MLflow, Airflow configs (examples only — live configs are gitignored)
+├── config/                         Spark, Unity Catalog, MLflow, Airflow configs (examples only - live configs are gitignored)
 ├── demos/                          Four demo slots (see below)
 ├── docs/                           Human-facing documentation
 ├── scripts/                        Helper scripts (download-jars, testdata, connectivity smoke tests)
@@ -125,7 +130,7 @@ The `demos/` directory ships with these four placeholders (Connect-first by defa
 | [`sdp-medallion/`](demos/sdp-medallion/) | `spark-pipelines` (Connect-backed) | Bronze → Silver → Gold via Spark Declarative Pipelines |
 | [`unity-catalog-multi-engine/`](demos/unity-catalog-multi-engine/) | Spark Connect + DuckDB | One catalog, multiple engines reading the same Iceberg table |
 | [`realtime-mode/`](demos/realtime-mode/) | Spark Connect (Structured Streaming) | Kafka → Iceberg with watermarked dedup |
-| [`local-mode-spark/`](demos/local-mode-spark/) | Local (no cluster) — **not yet implemented** | In-process SparkSession; placeholder for `--spark-local` |
+| [`local-mode-spark/`](demos/local-mode-spark/) | Local (no cluster) - **not yet implemented** | In-process SparkSession; placeholder for `--spark-local` |
 
 Each follows the [`demos/_template/`](demos/_template/) README contract (Purpose / Prereqs / Run / Expected output / Teardown). To scaffold a new demo:
 
@@ -135,7 +140,7 @@ cp -r demos/_template demos/<your-demo-name>
 
 ## AI-assistant integration
 
-If you use Claude Code, Cursor, Copilot, or another LLM-driven tool: the project ships with skill files under [`.claude/skills/`](.claude/skills/) that the AI loads on demand. The most important is `lakehouse-lifecycle` — a decision-tree-shaped runbook for start, stop, demo, and troubleshooting. See [CLAUDE.md](CLAUDE.md) for the index.
+If you use Claude Code, Cursor, Copilot, or another LLM-driven tool: the project ships with skill files under [`.claude/skills/`](.claude/skills/) that the AI loads on demand. The most important is `lakehouse-lifecycle` - a decision-tree-shaped runbook for start, stop, demo, and troubleshooting. See [CLAUDE.md](CLAUDE.md) for the index.
 
 Design principle: CLAUDE.md is a map, skills are the territory, agents are workers. Each lives in its own file with clear discovery metadata; nothing is preloaded into context that isn't needed.
 
@@ -159,7 +164,7 @@ The upstream `lakehouse-stack` repo supports multiple Spark versions, two catalo
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) — has separate sections for humans and for AI agents (the conventions for `.claude/skills/`, the demo contract, and what not to fabricate are non-obvious enough to deserve their own write-up).
+See [CONTRIBUTING.md](CONTRIBUTING.md) - has separate sections for humans and for AI agents (the conventions for `.claude/skills/`, the demo contract, and what not to fabricate are non-obvious enough to deserve their own write-up).
 
 Community standards: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
