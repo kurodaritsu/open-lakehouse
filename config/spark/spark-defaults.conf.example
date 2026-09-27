@@ -107,6 +107,16 @@ spark.jars  /opt/spark/jars-extra/iceberg-spark-runtime-4.0_2.13-1.10.0.jar,/opt
 spark.driver.memory                       4g
 spark.executor.memory                     8g
 spark.executor.cores                      2
+# Release idle executors. The Connect server is one long-lived app, so without
+# this it keeps every executor it grabbed at startup (3 x 8g) until restart.
+# Shuffle tracking stands in for the external shuffle service in standalone.
+spark.dynamicAllocation.enabled                  true
+spark.dynamicAllocation.shuffleTracking.enabled  true
+spark.dynamicAllocation.minExecutors             0
+spark.dynamicAllocation.executorIdleTimeout      120s
+# Executors holding shuffle output otherwise wait on driver GC of the shuffle
+# (default timeout is effectively infinite). Lost shuffle output gets recomputed.
+spark.dynamicAllocation.shuffleTracking.timeout  600s
 # Warehouse dir for SDP-managed tables. s3:// (not s3a://) so UC accepts it.
 spark.sql.warehouse.dir                   s3://lakehouse/warehouse/sdp
 # Default new tables to Delta. Parquet writes use the Hadoop FileOutputCommitter
