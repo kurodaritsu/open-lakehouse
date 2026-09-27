@@ -179,10 +179,13 @@ curl -X POST http://localhost:8081/api/2.1/unity-catalog/catalogs -H 'Content-Ty
   Re-run the build script after a UC image bump. Remove once `unitycatalog#1532` lands and UC can
   assume a role against SeaweedFS's STS (`aws.masterRoleArn`). Upstream refuses S3-compatible
   endpoint support (`#844`, `#1636` "Won't be merged", `#1743`), so don't wait for that.
-- Spark still runs with `spark.sql.catalog.<cat>.credScopedFs.enabled=false` and
-  `renewCredential.enabled=false`: s3a stays on `SimpleAWSCredentialsProvider` with the static keys
-  from `spark-defaults.conf`. Predates the generator; left in place because the scoped FS would
-  send an empty `X-Amz-Security-Token` header (untested against SeaweedFS).
+- Spark runs with `spark.sql.catalog.<cat>.credScopedFs.enabled=true` (`renewCredential.enabled`
+  stays `false`, the vended keys are static). Don't turn it off: `unitycatalog-hadoop`'s
+  `S3CredPropsBuilder` sets `fs.s3a.impl.disable.cache` in the vended table props, so without the
+  scoped FS and its `BoundedKeyedCache` every scan builds a new `S3AFileSystem` whose AWS SDK
+  `sdk-ScheduledExecutor` threads never get freed (~1,850 threads per full-table scan), and
+  executors die with "unable to create native thread" at the worker `pids_limit`. With it on,
+  reads and Delta writes against SeaweedFS work and the thread count stays flat.
 - MLflow model registry (`MLFLOW_REGISTRY_URI=uc:http://localhost:8081`, set in `~/.bashrc`):
   registration, artifact upload to `s3://lakehouse/managed/<catalog>/__unitystorage/catalogs/
   <id>/models/<id>/versions/<id>`, and `load_model("models:/<cat>.<schema>.<name>/<v>")` all work

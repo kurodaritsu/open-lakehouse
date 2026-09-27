@@ -20,34 +20,34 @@ spark.sql.extensions                      org.apache.iceberg.spark.extensions.Ic
 spark.sql.catalog.unity                   io.unitycatalog.spark.UCSingleCatalog
 spark.sql.catalog.unity.uri               http://unity-catalog:8080
 spark.sql.catalog.unity.token             not_used
-# Connector 0.5+ vends creds from UC and, by default, wraps s3a in a credential-
-# scoped filesystem that signs with a session token (AwsSessionCredentials).
-# UC only vends static creds here (server.properties s3.sessionToken.0 must be
-# non-empty for that path), and SeaweedFS rejects any request carrying
-# X-Amz-Security-Token with InvalidAccessKeyId. Disable both so s3a keeps
-# using SimpleAWSCredentialsProvider with the static keys below.
-spark.sql.catalog.unity.credScopedFs.enabled    false
+# Keep credScopedFs on. UC's vended table props set fs.s3a.impl.disable.cache,
+# so without the credential-scoped FS (and its own FS cache) every scan builds
+# a new S3AFileSystem whose SDK threads never get freed, and executors hit the
+# container pids_limit ("unable to create native thread"). SeaweedFS accepts
+# the requests since StaticNoTokenCredentialGenerator. Renewal stays off; the
+# vended keys are static.
+spark.sql.catalog.unity.credScopedFs.enabled    true
 spark.sql.catalog.unity.renewCredential.enabled false
 
 # example — same UC server, second catalog holding the UC demo assets and mnist.
 spark.sql.catalog.example                 io.unitycatalog.spark.UCSingleCatalog
 spark.sql.catalog.example.uri             http://unity-catalog:8080
 spark.sql.catalog.example.token           not_used
-spark.sql.catalog.example.credScopedFs.enabled    false
+spark.sql.catalog.example.credScopedFs.enabled    true
 spark.sql.catalog.example.renewCredential.enabled false
 
 # production — same UC server, live data products (bronze / silver / gold).
 spark.sql.catalog.production              io.unitycatalog.spark.UCSingleCatalog
 spark.sql.catalog.production.uri          http://unity-catalog:8080
 spark.sql.catalog.production.token        not_used
-spark.sql.catalog.production.credScopedFs.enabled    false
+spark.sql.catalog.production.credScopedFs.enabled    true
 spark.sql.catalog.production.renewCredential.enabled false
 
 # development - same UC server, dev/experimentation mirror of production.
 spark.sql.catalog.development             io.unitycatalog.spark.UCSingleCatalog
 spark.sql.catalog.development.uri         http://unity-catalog:8080
 spark.sql.catalog.development.token       not_used
-spark.sql.catalog.development.credScopedFs.enabled    false
+spark.sql.catalog.development.credScopedFs.enabled    true
 spark.sql.catalog.development.renewCredential.enabled false
 
 # Default Spark catalog as DeltaCatalog — Delta extension functions
