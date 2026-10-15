@@ -56,6 +56,8 @@ x-airflow-common:
     LAKEHOUSE_CATALOG: production
     # Pipeline config reads the S3-specific var, not `AWS_ENDPOINT_URL`.
     AWS_ENDPOINT_URL_S3: http://seaweedfs:8333
+    # Read-only GCS service account for pipeline pulls from GCS buckets.
+    GOOGLE_APPLICATION_CREDENTIALS: /opt/airflow/gcp/sa-key.json
   volumes:
     - ./dags:/opt/airflow/dags
     - ./logs/airflow:/opt/airflow/logs
@@ -64,6 +66,9 @@ x-airflow-common:
     - ./jars:/opt/airflow/jars
     - ./data:/opt/airflow/data
     - ./config/mlflow-client:/opt/mlflow-client:ro
+    # Key lives outside the repo; fail fast instead of podman creating an
+    # empty dir at the target when the var is unset.
+    - ${GCP_SA_KEY_FILE:?set GCP_SA_KEY_FILE in .env}:/opt/airflow/gcp/sa-key.json:ro,Z
   networks:
     - lakehouse-network
   # Rootless podman: map the host user to the image's airflow uid so the bind
